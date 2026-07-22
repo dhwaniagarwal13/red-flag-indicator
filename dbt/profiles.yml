@@ -1,0 +1,11 @@
+# Kept in-repo (not ~/.dbt) so the project runs after a clone with no setup.
+# Paths are relative to the dbt project dir, so there is nothing machine-specific.
+redflag:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: ../data/redflag.duckdb
+      threads: 4
+      extensions:
+        - parquet

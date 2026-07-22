@@ -1,0 +1,26 @@
+name: redflag
+version: "0.1.0"
+config-version: 2
+
+profile: redflag
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  # Fiscal years before this are too sparsely tagged in XBRL to trust.
+  min_fiscal_year: 2010
+  # A filing must be at least this many days after period end to be plausible.
+  min_filing_lag_days: 1
+
+models:
+  redflag:
+    staging:
+      +materialized: view
+      +schema: staging
+    marts:
+      +materialized: table
+      +schema: marts

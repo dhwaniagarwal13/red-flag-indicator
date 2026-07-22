@@ -1,0 +1,30 @@
+[project]
+name = "redflag-screener"
+version = "0.1.0"
+description = "Point-in-time forensic-accounting screener over SEC XBRL filings"
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.4",
+    "pandas>=2.2",
+    "pyarrow>=18",
+    "httpx>=0.27",
+    "dbt-core>=1.9",
+    "dbt-duckdb>=1.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
