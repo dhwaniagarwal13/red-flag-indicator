@@ -7,15 +7,16 @@ UNIVERSE ?= pilot
 # not just from inside dbt/.
 export REDFLAG_ROOT := $(CURDIR)
 
-.PHONY: help install ingest seeds build test all clean
+.PHONY: help install ingest ingest-prices seeds build test all clean
 
 help:
 	@echo "make install           create venv and install deps"
 	@echo "make ingest            fetch filings  (UNIVERSE=pilot)"
+	@echo "make ingest-prices     fetch price history for Z-Score (UNIVERSE=pilot)"
 	@echo "make seeds             export concepts.py metadata to dbt/seeds/"
 	@echo "make build             seeds + run dbt models"
 	@echo "make test              run dbt tests + pytest"
-	@echo "make all               ingest + build + test"
+	@echo "make all               ingest + ingest-prices + build + test"
 	@echo "make clean             drop generated data (keeps the raw cache)"
 
 install:
@@ -25,6 +26,9 @@ install:
 
 ingest:
 	PYTHONPATH=src $(PY) -m redflag.ingest --universe $(UNIVERSE)
+
+ingest-prices:
+	PYTHONPATH=src $(PY) -m redflag.ingest_prices --universe $(UNIVERSE)
 
 seeds:
 	PYTHONPATH=src $(PY) -m redflag.export_seeds
@@ -41,9 +45,10 @@ test:
 	cd dbt && DBT_PROFILES_DIR=. $(DBT) test
 	PYTHONPATH=src $(PY) -m pytest -q
 
-all: ingest build test
+all: ingest ingest-prices build test
 
-# Deliberately spares data/raw — refetching from the SEC is slow and impolite.
+# Deliberately spares data/raw — refetching from the SEC (and re-fetching
+# price history) is slow and impolite.
 clean:
 	rm -f data/redflag.duckdb data/staging/*.parquet
 	rm -rf dbt/target dbt/logs

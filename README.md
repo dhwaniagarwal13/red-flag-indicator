@@ -5,14 +5,16 @@ as-filed financial statements, reconstructs what was knowable on any past date,
 and ranks companies on the standard forensic metrics — Beneish M-Score, Altman
 Z-Score, Piotroski F-Score, accrual quality, and Benford's-Law digit analysis.
 
-**Status: Beneish M-Score live.** Ingestion, staging and the point-in-time fact
-table run end to end on a 23-company pilot; the restatement-detection
-artifacts found in Phase 1 are fixed and regression-tested; and the Beneish
-M-Score is built, tested, and shows a genuine hit on Under Armour's FY2015
-channel-stuffing year (see [M-Score](#beneish-m-score) below). Altman Z-Score
-and Piotroski F-Score are next. See [Current findings](#current-findings) for
-the restatement-layer results and [M-Score](#beneish-m-score) for the scoring
-results.
+**Status: Beneish M-Score and Altman Z-Score both live.** Ingestion, staging
+and the point-in-time fact table run end to end on a 23-company pilot; the
+restatement-detection artifacts found in Phase 1 are fixed and
+regression-tested; M-Score shows a genuine hit on Under Armour's FY2015
+channel-stuffing year; and Z-Score (now pulling in a second data source —
+market prices) shows Kraft Heinz and Bausch Health sitting in chronic
+"distress" territory, consistent with their real post-merger leverage.
+Piotroski F-Score is next. See [Current findings](#current-findings) for the
+restatement-layer results, [M-Score](#beneish-m-score) and
+[Z-Score](#altman-z-score) for the scoring results.
 
 ---
 
@@ -37,24 +39,25 @@ pervasive source of lookahead bias.
 ## Architecture
 
 ```
-SEC EDGAR companyfacts API
-      │   rate-limited (6 req/s), cached to disk, resumable
-      ▼
-data/raw/edgar/CIK*.json          bronze — byte-identical to the API response
-      │   flatten + canonical concept mapping
-      ▼
-data/staging/facts.parquet        silver — one row per reported fact
-      │   dbt
-      ▼
-stg_facts                         cleaned, period-typed, lag-checked, sign-normalised
-      │   join dbt/seeds/concepts.csv (exported from redflag.concepts)
-      ▼
-fct_financials_pit                bitemporal: value × filing, restatement computed
-                                   only within a consistent XBRL-tag lineage
-      ▼
-fct_beneish_mscore                8 indices + composite score, per company-year
-      ▼
-(next) fct_zscore, fct_fscore → Power BI / Tableau Public
+SEC EDGAR companyfacts API              yfinance (daily close prices)
+      │   rate-limited, cached, resumable    │   cached, one series per ticker
+      ▼                                      ▼
+data/raw/edgar/CIK*.json            data/raw/prices/{ticker}.parquet
+      │   flatten + concept map              │
+      ▼                                      ▼
+data/staging/facts.parquet          data/staging/prices.parquet
+      │   dbt                               │   dbt
+      ▼                                      ▼
+stg_facts ─── join concepts.csv       stg_prices
+      ▼                                      │
+fct_financials_pit                           │   nearest trading-day close
+  bitemporal; restatement only                │   on/before each fiscal year end
+  within a consistent tag lineage            │
+      │◄─────────────────────────────────────┘
+      ├──► fct_beneish_mscore     8 indices + composite, per company-year
+      └──► fct_altman_zscore      5 factors + composite, per company-year
+                  ▼
+          (next) fct_fscore → Power BI / Tableau Public
 ```
 
 `dbt/seeds/concepts.csv` is a generated artefact (`make seeds` /
@@ -64,7 +67,7 @@ restatement eligibility), so dbt and Python can never quietly disagree about it.
 
 ## Stack
 
-Python 3.11+ · DuckDB · dbt-core + dbt-duckdb · pandas · httpx · Power BI / Tableau Public
+Python 3.11+ · DuckDB · dbt-core + dbt-duckdb · pandas · httpx · yfinance · Power BI / Tableau Public
 
 Verified working on Python 3.14 / Windows.
 
@@ -75,7 +78,7 @@ Verified working on Python 3.14 / Windows.
 ```bash
 make install
 export SEC_USER_AGENT="Your Name your@email.com"   # SEC requires a contact
-make all          # ingest -> seeds -> dbt run -> dbt test -> pytest
+make all          # ingest -> ingest-prices -> seeds -> dbt run -> dbt test -> pytest
 ```
 
 No absolute paths anywhere in the code — everything resolves from the repo
@@ -234,6 +237,89 @@ in its detection scope, and it isn't claimed otherwise.
 
 ---
 
+## Altman Z-Score
+
+`fct_altman_zscore` computes the original 1968 model, one row per
+company-fiscal-year:
+
+```
+Z = 1.2·X1 + 1.4·X2 + 3.3·X3 + 0.6·X4 + 1.0·X5
+  X1 = working capital / total assets       X4 = market value of equity / total liabilities
+  X2 = retained earnings / total assets     X5 = revenue / total assets
+  X3 = EBIT / total assets (≈ operating income)
+```
+
+Z > **2.99** "safe", **1.81–2.99** "grey", < **1.81** "distress" — again,
+statistical zones, not a verdict. Unlike M-Score, this measures **bankruptcy
+risk**, not earnings manipulation — worth being precise about, because it
+changes what counts as a "hit" below.
+
+### A second data source, and the correctness trap it came with
+
+X4 is the only input anywhere in this project that isn't from a company's own
+filings — it needs what the *market* thought the company was worth. That
+meant standing up a second source (`redflag/sources/prices.py`, via
+`yfinance`; stooq.com's free CSV endpoint, the original plan, now sits behind
+a JavaScript proof-of-work bot check and isn't fetchable without a browser).
+
+Getting this right had a real trap: Yahoo's price history is always
+split-adjusted to *today's* share count — there's no way to ask it for the
+raw, as-traded price from before a since-occurred split. Pairing that
+adjusted price with `fct_financials_pit.value` for shares (the
+as-originally-filed count, Phase 1b's convention) would multiply an adjusted
+price by an unadjusted share count and misstate market cap by whatever split
+happened since — up to 28x for Apple, which split 7:1 in 2014 and 4:1 in 2020.
+Fixed by pairing the price with `latest_reported_value` instead (also fully
+split-adjusted, same basis) — the one input in this model that deliberately
+breaks from the "always use what was first known" convention, because here
+getting the *scale* right matters more than point-in-time purity. Documented
+prominently in the model SQL, not left implicit.
+
+### A second bug: an admitted fraud that scored as maximally "safe"
+
+Luckin Coffee's first Z-Score came back at **55.9** — X4 alone was 95x. Real
+Z-scores run single digits to the high teens; anything in that range is a
+scale bug, not a genuinely exceptional company, so this got investigated
+before being trusted. Cause: Luckin's XBRL reports ~1.6 billion total
+ordinary shares, but the LKNCY ADR does not trade 1 ADR = 1 ordinary share —
+ADR programs commonly bundle several ordinary shares into one ADR, and
+multiplying total ordinary shares by the ADR price overstates market cap by
+whatever that ratio is. The correct ratio could be looked up and applied, but
+guessing it and silently "correcting" the number would just swap one
+unverified figure for another. Fixed by structurally excluding every 20-F
+filer from X4 (this pilot only has one, Luckin, but the exclusion is general,
+not Luckin-specific) — `x1`, `x2`, `x3`, `x5` still compute normally, only the
+price-dependent term and the composite are withheld. Locked in as
+`assert_20f_filers_excluded_from_zscore.sql`; the underlying scale check that
+would catch a *different* company hitting a similar issue in a future
+universe expansion is `assert_zscore_within_plausible_range.sql`.
+
+Coverage after both fixes: **246 of 367 pilot company-years (67%)**.
+
+### Validation against the case-study companies
+
+| Company | What happened | What the Z-Score shows |
+|---|---|---|
+| **Bausch Health (ex-Valeant)** | Decade of acquisition-fuelled growth on heavy debt | **A genuine, sustained finding.** "Distress" zone (0.06–1.9) for essentially its entire 16-year history — not a single-event hit, but Z-Score correctly reading chronic balance-sheet fragility from a real, well-documented leverage story |
+| **Kraft Heinz** | 2015 3G Capital/Heinz merger financed with heavy debt; 2019 stock collapse and goodwill writedown | **Also a genuine, sustained finding.** "Distress" zone (0.5–1.5) across all 11 scored years — consistent with Kraft Heinz's well-known post-merger over-leverage, not tied to one accounting event |
+| **Under Armour** | SEC channel-stuffing charge | **Correctly no dramatic signal** ("safe"/"grey" throughout, no break around 2015–2016) — and that's the right outcome, not a miss. Pulling sales forward is an earnings-quality problem, not a solvency one; UAA was never balance-sheet distressed, so a bankruptcy-risk model has nothing to catch here. This is what M-Score is for |
+| **Luckin Coffee** | Fabricated ~$310M in revenue, disclosed 2020 | **Unscoreable** — see the ADR fix above. X1, X2, X3, X5 are all visible if you want to look, but the composite is deliberately withheld rather than guessed at |
+| **Hertz** | Actually filed Chapter 11, May 2020 — the one case-study company where Z-Score's actual design purpose applies most directly | **Zero coverage, 0 of 13 years.** The most relevant validation case in the whole pilot for this specific model, and this pilot cannot evaluate it — `current_assets`/`operating_income` are missing across nearly its whole history. Stated plainly rather than glossed over: this is a real gap, not a subtle one |
+| **GE** | 2018–19 restatement | **Zero coverage.** Same story as M-Score — `current_assets` wasn't tagged before FY2019 for a company that didn't present a classified balance sheet |
+| **Baseline** (AAPL, MSFT, JNJ, PG, KO, WMT, HD, TXN) | No known issues | All comfortably "safe" (4.9–10.3) for their most recent scored year. Sanity-checked against reality too: AAPL's FY2025 market cap computes to $3.83 trillion — matches the real number |
+
+Read honestly: **two genuine, sustained findings that track real leverage
+stories (BHC, KHC), one correctly quiet result that would be a false
+expectation to score as a "miss" (UAA), one structurally unscoreable case with
+a well-understood cause (LKNCY), and one real disappointment (Hertz — the
+single best validation case for *this specific model*, unscoreable due to
+coverage gaps).** Z-Score and M-Score are complementary, not redundant: BHC
+and KHC score unremarkably on M-Score but are the clearest hits on Z-Score,
+while UAA is the reverse — exactly what should happen when one model measures
+earnings quality and the other measures solvency.
+
+---
+
 ## Known limitations
 
 - **Survivorship bias in the universe.** SEC's ticker map lists only *current*
@@ -252,17 +338,31 @@ in its detection scope, and it isn't claimed otherwise.
 - **M-Score only detects accrual-based earnings manipulation**, by design —
   it was never going to catch a sales-practices scandal (Wells Fargo) or a
   drug-pricing scheme (Valeant/Bausch), and isn't claimed to.
-- **55% company-year coverage** even after fixing the two bugs found while
-  building the score (see [M-Score](#beneish-m-score)) — some real filers
+- **55% company-year coverage on M-Score** even after fixing the two bugs
+  found while building it (see [M-Score](#beneish-m-score)) — some real filers
   simply stop tagging a granular concept (e.g. SG&A as its own line) in later
   years, and that's not mechanically recoverable from missing data.
+- **67% company-year coverage on Z-Score**, with one significant gap: Hertz
+  — the single most relevant validation case in the pilot, given it actually
+  filed for bankruptcy in 2020 — has zero scored years. `current_assets` and
+  `operating_income` are missing across nearly its whole history.
+- **Z-Score isn't reliable for asset-light/richly-valued companies.** Altman's
+  original model assumes a manufacturing-style balance sheet; Adobe hits ~17
+  in this pilot (the model's normal range tops out around 3), not because it's
+  financially exceptional but because its total assets are small relative to
+  its market cap. Not wrong, exactly, but not comparable across sectors either.
+- **Z-Score's market-value term (X4) is structurally unavailable for foreign
+  private issuers** (20-F filers, e.g. Luckin Coffee) — see
+  [Z-Score](#altman-z-score) for why an ADR doesn't reliably convert to a
+  per-ordinary-share market cap without a verified ADR ratio this project
+  doesn't currently source.
 
 ## Roadmap
 
 - [x] Phase 1 — ingestion, staging, point-in-time fact table
 - [x] Phase 1b — fix tag/sign/units contamination above
 - [x] Phase 3a — Beneish M-Score, validated against case studies
-- [ ] Phase 3b — Altman Z-Score
+- [x] Phase 3b — Altman Z-Score, validated against case studies (adds a second data source: market prices)
 - [ ] Phase 3c — Piotroski F-Score
 - [ ] Phase 2 — expand to S&P 500 (deliberately after the metric layer is proven, not before)
 - [ ] Phase 4 — formal validation: full case backtest + accrual forward-return test
