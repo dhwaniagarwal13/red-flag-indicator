@@ -31,7 +31,13 @@ def ingest(universe: str, limit: int | None, refresh: bool) -> Path:
 
     with EdgarSource() as src:
         companies = src.list_companies()
-        selected = companies[companies.ticker.isin(tickers)].reset_index(drop=True)
+        selected = companies[companies.ticker.isin(tickers)]
+        # A universe should list one ticker per company, but list_companies()
+        # is deliberately not deduplicated by entity_id (see its docstring —
+        # dual-class shares share a CIK across tickers), so dedupe defensively
+        # here instead: after matching, not before, so every requested ticker
+        # still gets a chance to match its own row.
+        selected = selected.drop_duplicates("entity_id").reset_index(drop=True)
 
         missing = sorted(set(tickers) - set(selected.ticker))
         if missing:

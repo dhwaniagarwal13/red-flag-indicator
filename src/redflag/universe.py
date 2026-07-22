@@ -45,23 +45,41 @@ UNIVERSES: dict[str, list[str]] = {
 }
 
 
-def load_universe(name: str) -> list[str]:
-    """Return tickers for a named universe.
-
-    Falls back to ``data/universe/<name>.csv`` (one ``ticker`` column) so a
-    larger universe such as the S&P 500 can be dropped in without a code change.
-    """
-    if name in UNIVERSES:
-        return UNIVERSES[name]
-
+def _load_csv_universe(name: str) -> list[str]:
     path = Path(config.DATA) / "universe" / f"{name}.csv"
     if not path.exists():
         raise SystemExit(
-            f"unknown universe {name!r}. Built-ins: {', '.join(UNIVERSES)}. "
-            f"Or create {path} with a 'ticker' column."
+            f"unknown universe {name!r}. Built-ins: {', '.join(UNIVERSES)}, full. "
+            f"Or create {path} with a 'ticker' column "
+            f"(python -m redflag.fetch_sp500 creates sp500.csv)."
         )
     with path.open(newline="", encoding="utf-8") as fh:
         return [r["ticker"].strip().upper() for r in csv.DictReader(fh) if r.get("ticker")]
+
+
+def load_universe(name: str) -> list[str]:
+    """Return tickers for a named universe.
+
+    ``full`` is S&P 500 (``data/universe/sp500.csv``) plus the case-study
+    companies, deduplicated — kept as an explicit union rather than assuming
+    the case studies are a subset, because most of them aren't: LKNCY, NKLA,
+    BHC and HTZ have all been removed from or never held index membership at
+    various points, precisely because of the events that make them useful
+    test cases. Scaling to the full universe must not silently drop them.
+
+    Any other name not in ``UNIVERSES`` falls back to
+    ``data/universe/<name>.csv`` (one ``ticker`` column), so a universe such
+    as the S&P 500 can be dropped in without a code change.
+    """
+    if name == "full":
+        sp500 = _load_csv_universe("sp500")
+        combined = list(dict.fromkeys(sp500 + list(_CASE_STUDIES)))  # dedup, preserve order
+        return combined
+
+    if name in UNIVERSES:
+        return UNIVERSES[name]
+
+    return _load_csv_universe(name)
 
 
 def case_study_notes() -> dict[str, str]:

@@ -7,11 +7,12 @@ UNIVERSE ?= pilot
 # not just from inside dbt/.
 export REDFLAG_ROOT := $(CURDIR)
 
-.PHONY: help install ingest ingest-prices seeds build test all clean
+.PHONY: help install fetch-sp500 ingest ingest-prices seeds build test all clean
 
 help:
 	@echo "make install           create venv and install deps"
-	@echo "make ingest            fetch filings  (UNIVERSE=pilot)"
+	@echo "make fetch-sp500       fetch current S&P 500 constituents (one-time / refresh)"
+	@echo "make ingest            fetch filings  (UNIVERSE=pilot; UNIVERSE=full for S&P 500)"
 	@echo "make ingest-prices     fetch price history for Z-Score (UNIVERSE=pilot)"
 	@echo "make seeds             export concepts.py metadata to dbt/seeds/"
 	@echo "make build             seeds + run dbt models"
@@ -23,6 +24,9 @@ install:
 	python -m venv .venv
 	$(PY) -m pip install --upgrade pip
 	$(PY) -m pip install -e ".[dev]"
+
+fetch-sp500:
+	PYTHONPATH=src $(PY) -m redflag.fetch_sp500
 
 ingest:
 	PYTHONPATH=src $(PY) -m redflag.ingest --universe $(UNIVERSE)

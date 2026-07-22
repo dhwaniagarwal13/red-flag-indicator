@@ -9,6 +9,7 @@ dependencies = [
     "pyarrow>=18",
     "httpx>=0.27",
     "yfinance>=0.2",
+    "lxml>=5.0",
     "dbt-core>=1.9",
     "dbt-duckdb>=1.9",
 ]

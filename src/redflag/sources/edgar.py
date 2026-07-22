@@ -100,7 +100,18 @@ class EdgarSource:
             }
             for v in payload.values()
         ]
-        return pd.DataFrame(rows).drop_duplicates("entity_id").reset_index(drop=True)
+        # Deliberately NOT deduplicated by entity_id: dual/multi-class-share
+        # companies (Alphabet: GOOG/GOOGL, Fox: FOX/FOXA, Brown-Forman:
+        # BF-A/BF-B, ...) share one CIK across several tickers in SEC's map.
+        # Dropping to one row per CIK here previously discarded whichever
+        # ticker didn't happen to appear first, silently failing any lookup
+        # for that ticker even though the company genuinely has XBRL data —
+        # confirmed against BF-B, FOX, GOOG, NWS and MAA all "not found" in a
+        # 509-company Phase 2 ingest despite resolving to perfectly valid
+        # CIKs. Callers that want one row per company should dedupe by
+        # entity_id themselves *after* matching on the ticker they asked for
+        # (see redflag.ingest), not before.
+        return pd.DataFrame(rows).reset_index(drop=True)
 
     # ------------------------------------------------------------------ facts
     def _cache_path(self, entity_id: str) -> Path:

@@ -228,6 +228,64 @@ lineage_stats as (
             rows between unbounded preceding and unbounded following
         )
 
+),
+
+-- period_fiscal_year assumes one real annual period per company per label —
+-- true almost always, false for a company whose fiscal year end genuinely
+-- changed mid-history. L3Harris (LHX) is the clean example: Harris Corp
+-- reported on a June 30 fiscal year through FY2019, then filed a real ~6-month
+-- transition report ending 2020-01-03 to move onto a calendar-year basis —
+-- both period_end dates are genuine, meaningful annual-ish periods, and both
+-- naturally land under period_fiscal_year=2019. Fewer than ten companies in a
+-- 500-company universe hit this (also seen as a much smaller, ~1-day version
+-- of the same symptom — an XBRL instant tagged one day off a duration fact's
+-- period_end, e.g. Deere's FY2016 ppe_net at 2016-10-31 vs. every other
+-- FY2016 concept at 2016-10-30 — most likely inconsistent context-date
+-- authoring between filings, not a second real period). Either way, without
+-- a fix this produces two is_first_report rows for one company-year, which
+-- fans out into duplicate rows in every model that self-joins year-over-year.
+--
+-- No date-arithmetic rule can correctly split a genuine fiscal-year change
+-- into two distinct labels — there is no calendar-based way to know that
+-- "2019" should sometimes mean two different real periods for one company.
+-- Instead this picks exactly one canonical period_end per (entity,
+-- period_fiscal_year): whichever date the *most other concepts* for that
+-- company-year also report against, tie-broken toward the later date. The
+-- losing period stays fully present in this table under its own period_end —
+-- nothing is deleted — it just doesn't carry is_first_report for that label,
+-- so it won't feed the scoring models' year-over-year pivots. For a
+-- fiscal-year-change company this means one of the two real periods for the
+-- transition year is invisible to M-Score/Z-Score/F-Score; documented as a
+-- known limitation rather than silently dropped.
+period_end_support as (
+
+    select
+        wl.entity_id,
+        wl.period_fiscal_year,
+        wl.period_end,
+        count(distinct wl.concept) as n_concepts
+    from with_lineage wl
+    join lineage_stats ls
+        using (entity_id, concept, period_end, accession)
+    where ls.report_version = 1
+    group by wl.entity_id, wl.period_fiscal_year, wl.period_end
+
+),
+
+canonical_period_end as (
+
+    select entity_id, period_fiscal_year, period_end as canonical_period_end
+    from (
+        select
+            *,
+            row_number() over (
+                partition by entity_id, period_fiscal_year
+                order by n_concepts desc, period_end desc
+            ) as rn
+        from period_end_support
+    )
+    where rn = 1
+
 )
 
 select
@@ -259,8 +317,9 @@ select
     ls.first_filed_date,
     ls.latest_filed_date,
 
-    ls.report_version = 1                        as is_first_report,
-    wl.filed_date = ls.latest_filed_date          as is_latest_report,
+    ls.report_version = 1
+        and wl.period_end = cpe.canonical_period_end   as is_first_report,
+    wl.filed_date = ls.latest_filed_date               as is_latest_report,
 
     -- How far the figure moved between first and final telling, WITHIN the
     -- current tag's lineage only. Null for out-of-lineage rows (no comparison
@@ -283,3 +342,5 @@ select
 from with_lineage wl
 left join lineage_stats ls
     using (entity_id, concept, period_end, accession)
+left join canonical_period_end cpe
+    using (entity_id, period_fiscal_year)

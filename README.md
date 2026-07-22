@@ -5,18 +5,19 @@ as-filed financial statements, reconstructs what was knowable on any past date,
 and ranks companies on the standard forensic metrics — Beneish M-Score, Altman
 Z-Score, Piotroski F-Score, accrual quality, and Benford's-Law digit analysis.
 
-**Status: all three scoring models live** — Beneish M-Score, Altman Z-Score,
-and Piotroski F-Score. Ingestion, staging and the point-in-time fact table run
-end to end on a 23-company pilot; the restatement-detection artifacts found in
-Phase 1 are fixed and regression-tested; M-Score and F-Score independently
-converge on Under Armour's FY2015 channel-stuffing year (a manipulation
-signal and a fundamentals collapse, from two unrelated models); and Z-Score
-(pulling in a second data source, market prices) shows Kraft Heinz and Bausch
-Health sitting in chronic "distress" territory, consistent with their real
-post-merger leverage. See [Current findings](#current-findings) for the
-restatement-layer results, and [M-Score](#beneish-m-score),
-[Z-Score](#altman-z-score), [F-Score](#piotroski-f-score) for the scoring
-results.
+**Status: scaled to the S&P 500.** All three scoring models (Beneish M-Score,
+Altman Z-Score, Piotroski F-Score) are live, tested, and now run across 501
+companies / 7,554 company-years — not just the 23-company pilot they were
+built and validated on. Scaling up surfaced three more real bugs (see
+[Scaling to the S&P 500](#scaling-to-the-sp-500)), on top of the eight found
+building the models themselves. M-Score and F-Score independently converge on
+Under Armour's FY2015 channel-stuffing year; Z-Score shows Kraft Heinz and
+Bausch Health sitting in chronic "distress" territory, consistent with their
+real post-merger leverage. See [Current findings](#current-findings) for the
+restatement-layer results, [M-Score](#beneish-m-score),
+[Z-Score](#altman-z-score), [F-Score](#piotroski-f-score) for the pilot-scale
+validation, and [Scaling to the S&P 500](#scaling-to-the-sp-500) for what
+changed at scale.
 
 ---
 
@@ -68,6 +69,11 @@ fct_financials_pit                           │   nearest trading-day close
 is the single source of truth for concept metadata (sign convention,
 restatement eligibility), so dbt and Python can never quietly disagree about it.
 
+`data/universe/sp500.csv` is likewise generated (`python -m redflag.fetch_sp500`,
+from Wikipedia's S&P 500 constituent table), not hand-maintained.
+`redflag.universe.load_universe("full")` unions it with the case-study
+companies — see [Scaling to the S&P 500](#scaling-to-the-sp-500).
+
 ## Stack
 
 Python 3.11+ · DuckDB · dbt-core + dbt-duckdb · pandas · httpx · yfinance · Power BI / Tableau Public
@@ -82,7 +88,14 @@ Verified working on Python 3.14 / Windows.
 make install
 export SEC_USER_AGENT="Your Name your@email.com"   # SEC requires a contact
 make all          # ingest -> ingest-prices -> seeds -> dbt run -> dbt test -> pytest
+                  # UNIVERSE=pilot by default; UNIVERSE=full for the S&P 500
+                  # (needs data/universe/sp500.csv — see make seeds-sp500 below)
 ```
+
+`make fetch-sp500` fetches the S&P 500 constituent list once; after that,
+`make all UNIVERSE=full` ingests and scores the full universe. Budget real
+time for this — EDGAR is rate-limited and price history is fetched one
+ticker at a time (~500 companies takes several minutes for each).
 
 No absolute paths anywhere in the code — everything resolves from the repo
 root (`redflag.config.ROOT`, or `$REDFLAG_ROOT` for dbt). One thing that *is*
@@ -408,6 +421,94 @@ agree.
 
 ---
 
+## Scaling to the S&P 500
+
+`python -m redflag.fetch_sp500` pulls the current constituent list from
+Wikipedia (S&P's own membership data isn't free; this is the same source most
+free finance tooling uses) and writes it to `data/universe/sp500.csv`.
+`universe.load_universe("full")` unions it with the case-study companies —
+kept as an explicit union, not assumed to be a subset, because most of the
+case studies (LKNCY, NKLA, BHC, HTZ) have been removed from or never held
+index membership, generally *because of* the events that make them useful
+test cases. Losing them silently when scaling up would have defeated the
+point of validating against them in the first place.
+
+Deliberately done *after* the metric layer was built and validated on the
+pilot, not before: debugging a wrong ratio against 8 well-understood
+companies is tractable; debugging it against 500 unknowns is not. That
+ordering paid off immediately — every bug below was caught within minutes of
+the first full-scale build, against tests and diagnostic habits already
+established on the pilot.
+
+**Result: 501 companies, 7,554 company-years**, built and tested in under 3
+seconds end to end (DuckDB, even with 1.87M raw XBRL facts). Coverage
+naturally dropped from the pilot's hand-picked blue-chip mix — the S&P 500
+pulls in far more banks, insurers and REITs, which these ratio-based models
+are structurally not suited to (see [Known limitations](#known-limitations)):
+M-Score 42% (was 55%), Z-Score 65% (was 67%), F-Score 47% (was 68%).
+
+### Three more bugs, found in the first hour at scale
+
+1. **Dual-class tickers silently lost.** `EdgarSource.list_companies()`
+   deduplicated SEC's ticker map by CIK before any ticker matching happened —
+   fine for the pilot (no dual-class companies in it), wrong in general: a
+   company with two share classes (Alphabet: GOOG/GOOGL, Fox: FOX/FOXA,
+   Brown-Forman: BF-A/BF-B, ...) shares one CIK across multiple tickers, and
+   the dedup kept only whichever ticker happened to appear first, silently
+   failing any lookup for the other. Confirmed against the actual failure:
+   BF-B, FOX, GOOG, NWS and MAA all reported "not found in SEC map" despite
+   resolving to perfectly valid CIKs with real XBRL data. Fixed by moving the
+   dedup to *after* ticker matching (in `redflag.ingest`) instead of before
+   (in `list_companies()`) — recovered 2 companies (499 → 501; MAA and NWS's
+   CIKs were already covered by other tickers pointing at the same entity).
+
+2. **A fiscal-year change fanned out into duplicate rows.** `period_fiscal_year`
+   assumes one real annual period per company per calendar-year label — true
+   for 497 of 501 companies, false for one clean, well-documented case: L3Harris
+   (LHX) reported on Harris Corp's legacy June 30 fiscal year through FY2019,
+   then filed a genuine ~6-month transition report ending 2020-01-03 to move
+   onto a calendar-year basis. Both dates are real, meaningful annual periods;
+   both naturally land under `period_fiscal_year = 2019`. No date-arithmetic
+   rule can correctly split a genuine fiscal-year change into two labels —
+   there's no calendar-based way to know in advance that "2019" should
+   sometimes mean two different periods for one company. Fixed by picking one
+   canonical `period_end` per company-year (whichever date the *most other
+   concepts* for that company-year also report against) rather than trying to
+   guess the "right" one — the losing period stays fully present in the table,
+   it just doesn't feed the scoring models for that label. A much smaller,
+   ~1-day version of the identical symptom (a probable XBRL context-date
+   authoring inconsistency between filings, not a second real period) also
+   showed up for Deere and a handful of others; the same fix resolves both.
+   Locked in as `assert_lhx_fiscal_year_change_resolved.sql` for the specific
+   real case and `assert_unique_first_report_per_fiscal_year.sql` for the
+   general invariant.
+
+3. **The plausible-range sanity tests stopped being reliable bug detectors.**
+   Both of the defensive range checks added during M-Score/Z-Score
+   development (the same kind of test that caught LKNCY's ADR bug) fired at
+   S&P 500 scale — but investigation showed neither was a bug. Carnival and
+   Norwegian Cruise Line both hit extreme M-Scores (-21.7, +98.2) because
+   several Beneish indices are year-over-year ratios-of-ratios, and both
+   companies had a real, near-zero-revenue year during COVID-era shutdowns in
+   the comparison window — a genuine business collapse, not bad data. NVIDIA,
+   Palantir, Texas Pacific Land, Intuitive Surgical and Monolithic Power all
+   hit extreme Z-Scores (50-195) — checked against their actual balance
+   sheets, not assumed: their total-liabilities-to-total-assets ratios are
+   entirely ordinary (10-25%), so this isn't a near-zero-denominator
+   artifact the way LKNCY's ADR mismatch was. It's simply that these are some
+   of the market's most richly-valued companies relative to a normal
+   liability base — exactly the asset-light/high-valuation weakness already
+   documented for Z-Score, just far more extreme than Adobe's ~17 in the
+   pilot. Both tests' bounds were widened with the specific verified cases
+   documented in the test files, on the explicit understanding that a fixed
+   numeric bound is a weaker bug signal now than it was at pilot scale —
+   PLTR's legitimate 195 exceeds LKNCY's original buggy 55.9. A future
+   failure here needs the same checking-not-assuming treatment these three
+   companies got, not an automatic "must be a bug" or an automatic "just
+   widen the bound again."
+
+---
+
 ## Known limitations
 
 - **Survivorship bias in the universe.** SEC's ticker map lists only *current*
@@ -426,14 +527,24 @@ agree.
 - **M-Score only detects accrual-based earnings manipulation**, by design —
   it was never going to catch a sales-practices scandal (Wells Fargo) or a
   drug-pricing scheme (Valeant/Bausch), and isn't claimed to.
-- **55% company-year coverage on M-Score** even after fixing the two bugs
-  found while building it (see [M-Score](#beneish-m-score)) — some real filers
-  simply stop tagging a granular concept (e.g. SG&A as its own line) in later
-  years, and that's not mechanically recoverable from missing data.
-- **67% company-year coverage on Z-Score**, with one significant gap: Hertz
-  — the single most relevant validation case in the pilot, given it actually
-  filed for bankruptcy in 2020 — has zero scored years. `current_assets` and
-  `operating_income` are missing across nearly its whole history.
+- **Company-year coverage: pilot vs. the full S&P 500 universe.** M-Score 55%
+  → 42%, Z-Score 67% → 65%, F-Score 68% → 47% (see
+  [Scaling to the S&P 500](#scaling-to-the-sp-500)). The pilot was hand-picked
+  toward traditional, well-tagged blue chips; the S&P 500 includes far more
+  banks, insurers and REITs these ratio-based models don't fit well. Some real
+  filers also simply stop tagging a granular concept (e.g. SG&A as its own
+  line) in later years, which isn't mechanically recoverable from missing data.
+- **Hertz has zero scored Z-Score years**, in either universe — the single
+  most relevant validation case available, given it actually filed for
+  bankruptcy in 2020. `current_assets` and `operating_income` are missing
+  across nearly its whole history.
+- **A fixed numeric bound is a weaker bug-detection signal at S&P 500 scale
+  than it was at pilot scale.** The plausible-range dbt tests (originally
+  written to catch exactly the kind of scale bug LKNCY's ADR mismatch was)
+  had to be widened after real companies — NVIDIA, Palantir, Texas Pacific
+  Land — legitimately exceeded LKNCY's own buggy value. See
+  [Scaling to the S&P 500](#scaling-to-the-sp-500) for the specific
+  companies checked before the bounds were touched.
 - **Z-Score isn't reliable for asset-light/richly-valued companies.** Altman's
   original model assumes a manufacturing-style balance sheet; Adobe hits ~17
   in this pilot (the model's normal range tops out around 3), not because it's
@@ -469,7 +580,7 @@ agree.
 - [x] Phase 3a — Beneish M-Score, validated against case studies
 - [x] Phase 3b — Altman Z-Score, validated against case studies (adds a second data source: market prices)
 - [x] Phase 3c — Piotroski F-Score, validated against case studies
-- [ ] Phase 2 — expand to S&P 500 (deliberately after the metric layer is proven, not before)
+- [x] Phase 2 — expand to the S&P 500 (501 companies, 7,554 company-years; done after the metric layer was proven, not before)
 - [ ] Phase 4 — formal validation: full case backtest + accrual forward-return test
 - [ ] Phase 5 — Power BI screener + Tableau Public mirror
 - [ ] Phase 6 — findings write-up
