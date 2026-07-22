@@ -2,12 +2,18 @@ PY := .venv/Scripts/python.exe
 DBT := ../.venv/Scripts/dbt.exe
 UNIVERSE ?= pilot
 
-.PHONY: help install ingest build test all clean
+# Absolute repo root. dbt models resolve raw Parquet paths against it (see
+# stg_facts.sql) so the warehouse can be queried from any working directory,
+# not just from inside dbt/.
+export REDFLAG_ROOT := $(CURDIR)
+
+.PHONY: help install ingest seeds build test all clean
 
 help:
 	@echo "make install           create venv and install deps"
 	@echo "make ingest            fetch filings  (UNIVERSE=pilot)"
-	@echo "make build             run dbt models"
+	@echo "make seeds             export concepts.py metadata to dbt/seeds/"
+	@echo "make build             seeds + run dbt models"
 	@echo "make test              run dbt tests + pytest"
 	@echo "make all               ingest + build + test"
 	@echo "make clean             drop generated data (keeps the raw cache)"
@@ -20,7 +26,11 @@ install:
 ingest:
 	PYTHONPATH=src $(PY) -m redflag.ingest --universe $(UNIVERSE)
 
-build:
+seeds:
+	PYTHONPATH=src $(PY) -m redflag.export_seeds
+
+build: seeds
+	cd dbt && DBT_PROFILES_DIR=. $(DBT) seed
 	cd dbt && DBT_PROFILES_DIR=. $(DBT) run
 
 test:

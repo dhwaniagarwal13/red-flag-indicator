@@ -14,11 +14,30 @@ used so coverage is auditable rather than assumed.
   * ``duration`` — flow items (revenue, net income). The fact has start+end.
   * ``instant``  — stock items (assets, equity). The fact has end only.
 Mixing them silently produces nonsense, so the flattener keys off this.
+
+Two more fields exist because real XBRL data breaks in specific, recurring ways
+(see Phase 1b diagnosis in the project README):
+
+``sign_convention`` — most expense-type concepts are tagged as a positive
+magnitude by convention, but a filer occasionally submits one as negative
+(e.g. presented as a reduction). ``"always_positive"`` tells the staging layer
+to normalise sign with ``abs()``. Left as ``"any"`` for concepts where the sign
+is itself meaningful (``income_tax_expense`` is legitimately negative in a year
+with a net tax *benefit* — normalising that away would delete real information).
+
+``restatement_eligible`` — some concepts change value for reasons that have
+nothing to do with accounting quality. Diluted share counts move on stock
+splits (a healthy, disclosed, unrelated event) and are also unusually prone to
+filer scale/unit typos. Both would contaminate a restatement-based risk score,
+so such concepts are excluded from that particular use — while still being kept
+in the fact table for anyone who wants them for other purposes.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+import pandas as pd
 
 
 @dataclass(frozen=True)
@@ -28,6 +47,8 @@ class Concept:
     tags: tuple[str, ...]
     statement: str
     required: bool = True  # if False, absence is expected for some filers
+    sign_convention: str = "any"  # "any" | "always_positive"
+    restatement_eligible: bool = True
 
 
 CONCEPTS: tuple[Concept, ...] = (
@@ -54,6 +75,7 @@ CONCEPTS: tuple[Concept, ...] = (
             "CostOfServices",
         ),
         "income_statement",
+        sign_convention="always_positive",
     ),
     Concept("gross_profit", "duration", ("GrossProfit",), "income_statement", required=False),
     Concept("operating_income", "duration", ("OperatingIncomeLoss",), "income_statement"),
@@ -77,6 +99,7 @@ CONCEPTS: tuple[Concept, ...] = (
         ),
         "income_statement",
         required=False,
+        sign_convention="always_positive",
     ),
     Concept(
         "depreciation_amortisation",
@@ -89,13 +112,29 @@ CONCEPTS: tuple[Concept, ...] = (
         ),
         "cash_flow",
         required=False,
+        sign_convention="always_positive",
     ),
     Concept(
+        # Gross interest expense only. Deliberately does NOT include
+        # InterestIncomeExpenseNet, which nets interest income against
+        # interest expense and can legitimately be negative (net interest
+        # income) — conflating it here previously produced a false "sign
+        # flip" restatement whenever a filer switched between the two tags.
+        # See interest_income_expense_net below for the net figure.
         "interest_expense",
         "duration",
-        ("InterestExpense", "InterestExpenseDebt", "InterestIncomeExpenseNet"),
+        ("InterestExpense", "InterestExpenseDebt"),
         "income_statement",
         required=False,
+        sign_convention="always_positive",
+    ),
+    Concept(
+        "interest_income_expense_net",
+        "duration",
+        ("InterestIncomeExpenseNet",),
+        "income_statement",
+        required=False,
+        # Net figure: sign is meaningful (net income vs. net expense).
     ),
     Concept(
         "income_tax_expense",
@@ -103,6 +142,7 @@ CONCEPTS: tuple[Concept, ...] = (
         ("IncomeTaxExpenseBenefit",),
         "income_statement",
         required=False,
+        # Legitimately negative in a net-tax-benefit year — do not normalise.
     ),
     # ------------------------------------------------------------ cash flow
     Concept(
@@ -183,6 +223,12 @@ CONCEPTS: tuple[Concept, ...] = (
         required=False,
     ),
     Concept(
+        # Excluded from restatement scoring: retroactive changes here are
+        # overwhelmingly stock splits (a real, legitimate, disclosed event —
+        # Apple's FY2013 comparative share count was correctly restated 7x
+        # after its 2014 split) or plain filer scale/unit typos (Merck once
+        # filed a fiscal-2012 comparative off by exactly 1,000,000x). Neither
+        # is an accounting-quality signal.
         "shares_diluted",
         "duration",
         (
@@ -191,6 +237,7 @@ CONCEPTS: tuple[Concept, ...] = (
         ),
         "income_statement",
         required=False,
+        restatement_eligible=False,
     ),
 )
 
@@ -204,3 +251,22 @@ for _c in CONCEPTS:
 CONCEPT_BY_NAME: dict[str, Concept] = {c.name: c for c in CONCEPTS}
 ALL_TAGS: frozenset[str] = frozenset(TAG_LOOKUP)
 REQUIRED_CONCEPTS: tuple[str, ...] = tuple(c.name for c in CONCEPTS if c.required)
+
+
+def to_dataframe() -> pd.DataFrame:
+    """Concept metadata as a table, for export as a dbt seed.
+
+    concepts.py is the single source of truth for this metadata; the seed is a
+    generated artefact (see ``export_seeds.py``), never hand-edited.
+    """
+    return pd.DataFrame(
+        {
+            "concept": c.name,
+            "kind": c.kind,
+            "statement": c.statement,
+            "required": c.required,
+            "sign_convention": c.sign_convention,
+            "restatement_eligible": c.restatement_eligible,
+        }
+        for c in CONCEPTS
+    )

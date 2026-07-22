@@ -5,10 +5,11 @@ as-filed financial statements, reconstructs what was knowable on any past date,
 and ranks companies on the standard forensic metrics — Beneish M-Score, Altman
 Z-Score, Piotroski F-Score, accrual quality, and Benford's-Law digit analysis.
 
-**Status: Phase 1 (thin slice) complete.** Ingestion, staging and the
-point-in-time fact table run end to end on a 23-company pilot. The metric layer
-is not built yet. See [Current findings](#current-findings) for what the data
-already shows, including what is *not* yet trustworthy.
+**Status: Phase 1b complete.** Ingestion, staging and the point-in-time fact
+table run end to end on a 23-company pilot, and the three restatement-detection
+artifacts found in Phase 1 are fixed and covered by regression tests. The
+metric layer (M-Score, Z-Score, F-Score, Benford) is not built yet. See
+[Current findings](#current-findings) for what the data shows now.
 
 ---
 
@@ -42,12 +43,19 @@ data/raw/edgar/CIK*.json          bronze — byte-identical to the API response
 data/staging/facts.parquet        silver — one row per reported fact
       │   dbt
       ▼
-stg_facts                         cleaned, period-typed, lag-checked
+stg_facts                         cleaned, period-typed, lag-checked, sign-normalised
+      │   join dbt/seeds/concepts.csv (exported from redflag.concepts)
       ▼
-fct_financials_pit                bitemporal: value × filing that reported it
+fct_financials_pit                bitemporal: value × filing, restatement computed
+                                   only within a consistent XBRL-tag lineage
       ▼
 (next) fct_ratios → fct_scores → Power BI / Tableau Public
 ```
+
+`dbt/seeds/concepts.csv` is a generated artefact (`make seeds` /
+`python -m redflag.export_seeds`), never hand-edited — `redflag/concepts.py`
+is the single source of truth for concept metadata (sign convention,
+restatement eligibility), so dbt and Python can never quietly disagree about it.
 
 ## Stack
 
@@ -60,16 +68,18 @@ Verified working on Python 3.14 / Windows.
 ## Quickstart
 
 ```bash
-python -m venv .venv
-.venv/Scripts/pip install -e .          # or: pip install -r requirements.txt
-
+make install
 export SEC_USER_AGENT="Your Name your@email.com"   # SEC requires a contact
-python -m redflag.ingest --universe pilot
-
-cd dbt && DBT_PROFILES_DIR=. dbt run && dbt test
+make all          # ingest -> seeds -> dbt run -> dbt test -> pytest
 ```
 
-No absolute paths anywhere — everything resolves from the repo root.
+No absolute paths anywhere in the code — everything resolves from the repo
+root (`redflag.config.ROOT`, or `$REDFLAG_ROOT` for dbt). One thing that *is*
+absolute and does **not** survive being moved: the venv's own console-script
+launchers (`dbt.exe` etc.) — pip bakes the interpreter's absolute path into
+them at install time. If you relocate the repo, recreate the venv
+(`rm -rf .venv && make install`) rather than moving it; this project's own
+venv briefly broke exactly this way mid-Phase-1b.
 
 ---
 
@@ -81,7 +91,9 @@ reporting filing), so a fiscal year typically appears three times — its own 10
 plus two years as a comparative.
 
 Key columns: `report_version`, `n_reports`, `is_first_report`, `is_latest_report`,
-`first_reported_value`, `latest_reported_value`, `restatement_pct`, `was_restated`.
+`first_reported_value`, `latest_reported_value`, `restatement_pct`, `was_restated`,
+plus three added in Phase 1b: `latest_tag`, `in_lineage`, `tag_switch_detected`,
+and `restatement_eligible` (joined from the concepts seed).
 
 This supports both analytical bases:
 
@@ -92,28 +104,54 @@ This supports both analytical bases:
 
 ## Current findings
 
-Restatement rates across the pilot universe put GE, Under Armour, Wells Fargo,
-Kraft Heinz and Bausch Health near the top, and Apple, Cisco, Adobe and Home
-Depot near the bottom. That ordering is suggestive — four of eight case-study
-companies rank in the top seven.
+Restatement rates across the pilot universe put GE, Procter & Gamble, Bausch
+Health, Lockheed Martin, Wells Fargo, Under Armour and Kraft Heinz at the top,
+and Cisco, Adobe, Luckin Coffee and Hertz at zero. Five of eight case-study
+companies land in the top six of 22.
 
-**It is not yet trustworthy.** Diagnostics showed the current
-`restatement_pct` is contaminated by three artifacts:
+### Phase 1b: three artifacts diagnosed and fixed
 
-1. **Tag switching.** A filer moving from `NetCashProvidedByUsedInOperatingActivities`
-   to `...ContinuingOperations` between filings registers as a restatement. Values
-   must be compared within the same `source_tag`.
-2. **Sign conventions.** XBRL does not enforce a sign for expense items —
-   Hertz's interest expense flips from +70M to −608M between filings.
-3. **Share counts.** `shares_diluted` restatements are stock splits (Apple 7:1,
-   4:1) and unit-scale inconsistencies (Merck reporting in millions vs units),
-   never accounting revisions.
+Phase 1's restatement_pct compared every filing for a period against every
+other filing for that period, regardless of which XBRL tag reported the value
+or what that value's sign should mean. Three real cases exposed why that's
+wrong:
 
-A fourth issue is conceptual rather than mechanical: **legitimate restatements
-look identical to suspicious ones.** Procter & Gamble ranks second largely
-because divesting Duracell and its beauty brands forced restatement of prior-year
-comparatives for discontinued operations. Separating reclassification from
-revision is the substantive analytical problem here.
+| Case | Root cause | Fix |
+|---|---|---|
+| **Hertz interest expense**, FY2020: appeared to swing 70M → −608M (−968%) | A later filing switched from the gross `InterestExpense` tag to the net `InterestIncomeExpenseNet` tag — two different figures, not one restated | `restatement_pct` now computed only across filings sharing the **same tag** (`in_lineage`); tag changes are surfaced separately via `tag_switch_detected` rather than read as a value change. `InterestIncomeExpenseNet` split into its own `interest_income_expense_net` concept so it can never be merged into gross expense again |
+| **Merck diluted shares**, FY2012: 3,076 → 3,076,000,000, same tag, same declared unit | A scale typo in Merck's own filed XBRL, not an accounting event | `shares_diluted` marked `restatement_eligible = false` — kept in the fact table for transparency, excluded from any restatement-based score |
+| **Apple diluted shares**, FY2013: exact 7.0000x jump | Correct, legitimate retroactive restatement for Apple's 2014 7-for-1 stock split | Same fix as above — share counts are structurally excluded from the risk signal regardless of *why* they moved, because neither cause is an accounting-quality signal |
+
+Applying the tag-lineage fix also cleaned up the general leaderboard, not just
+the three hand-diagnosed cases — e.g. Merck's restatement rate across core P&L
+concepts dropped from 12.5%/33.9% worst-move to 8.3%/16.5% once
+inconsistent-tag comparisons stopped being counted.
+
+**One case that looked like it might be a fourth artifact, and wasn't.** GE's
+operating cash flow for FY2016 moved from −244M to 1160M under the exact same
+tag (`NetCashProvidedByUsedInOperatingActivities`) across all three filings
+that reported it — no tag switch, no sign issue. That's GE's real, publicly
+documented 2018–19 accounting restatement (the insurance/long-term-care reserve
+issue that drew SEC scrutiny), and it correctly survives the fix. Worth stating
+plainly: **not every large restatement is a data bug** — the fix here was to
+stop conflating artifacts with genuine restatements, not to suppress large
+numbers.
+
+Both fixed cases are locked in as dbt regression tests
+(`dbt/tests/assert_htz_interest_expense_fix.sql`,
+`assert_no_negative_always_positive_values.sql`), plus Python-level tests on
+the concept metadata itself (`tests/test_concepts.py`) so the underlying cause
+can't silently regress even before a full ingest+build cycle would catch it.
+
+### Still an open, conceptual problem
+
+**Legitimate restatements can look identical to suspicious ones**, and no
+mechanical fix resolves this — it needs judgment. Procter & Gamble ranks near
+the top largely because divesting Duracell and its beauty brands forced
+restatement of prior-year comparatives for discontinued operations — ordinary
+GAAP housekeeping, not a red flag. Separating reclassification from revision
+(e.g. by cross-referencing 8-K divestiture disclosures) is Phase 3+ work, not
+something the point-in-time layer alone can settle.
 
 ---
 
@@ -132,7 +170,7 @@ revision is the substantive analytical problem here.
 ## Roadmap
 
 - [x] Phase 1 — ingestion, staging, point-in-time fact table
-- [ ] Phase 1b — fix tag/sign/units contamination above
+- [x] Phase 1b — fix tag/sign/units contamination above
 - [ ] Phase 2 — expand to S&P 500
 - [ ] Phase 3 — ratio + score models (M-Score, Z-Score, F-Score, accruals, Benford)
 - [ ] Phase 4 — validation: case backtest + accrual forward-return test

@@ -1,0 +1,39 @@
+version: 2
+
+models:
+  - name: fct_financials_pit
+    description: >
+      Bitemporal fact table: one row per (company, concept, fiscal period,
+      filing that reported it). See the model SQL for the Phase 1b
+      restatement-vs-tag-switch fix.
+    columns:
+      - name: entity_id
+        tests: [not_null]
+      - name: concept
+        tests: [not_null]
+      - name: period_end
+        tests: [not_null]
+      - name: value
+        tests: [not_null]
+      - name: source_tag
+        tests: [not_null]
+      - name: restatement_eligible
+        tests: [not_null]
+      - name: was_restated
+        tests: [not_null]
+      - name: tag_switch_detected
+        tests: [not_null]
+
+seeds:
+  - name: concepts
+    description: Concept metadata exported from redflag.concepts (Python is the source of truth).
+    columns:
+      - name: concept
+        tests: [not_null, unique]
+      - name: sign_convention
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["any", "always_positive"]
+      - name: restatement_eligible
+        tests: [not_null]

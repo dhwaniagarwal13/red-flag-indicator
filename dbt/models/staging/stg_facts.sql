@@ -1,6 +1,8 @@
 -- Every reported fact, cleaned but not yet deduplicated.
 --
--- Two corrections happen here, both of which matter more than they look:
+-- Corrections applied here, each earning its keep the hard way (see the
+-- Phase 1b diagnosis in the project README for the real cases that found
+-- each one):
 --
 -- 1. `fiscal_year` as returned by the SEC is the fiscal year of the *filing
 --    document*, not of the period the fact describes. A FY2022 figure appearing
@@ -10,11 +12,24 @@
 -- 2. Duration facts (revenue, net income) arrive at mixed frequencies — annual,
 --    quarterly, and occasionally odd stub periods. We classify by day count
 --    rather than trusting `fiscal_period`, which filers populate inconsistently.
+--
+-- 3. Sign normalisation for concepts that are conventionally a positive
+--    magnitude (cost of goods sold, SG&A, D&A, gross interest expense). A
+--    filer occasionally submits one as negative; `abs()` it and record that it
+--    happened via `sign_was_negative`, rather than let a rare sign-convention
+--    slip masquerade as a value change downstream. Concepts where sign is
+--    itself meaningful (income_tax_expense can be a real net benefit) are
+--    listed in the concepts seed with sign_convention='any' and left alone.
 
 with raw as (
 
     select *
-    from read_parquet('{{ var("staging_path", "../data/staging/facts.parquet") }}')
+    -- REDFLAG_ROOT defaults to '..' so `cd dbt && dbt run` keeps working with
+    -- no setup, but resolving a relative path against DuckDB's *query-time*
+    -- working directory means this view breaks the moment someone queries it
+    -- from anywhere else. The Makefile exports REDFLAG_ROOT as an absolute
+    -- path for exactly this reason — always prefer that over the fallback.
+    from read_parquet('{{ env_var("REDFLAG_ROOT", "..") }}/data/staging/facts.parquet')
 
 ),
 
@@ -67,10 +82,29 @@ classified as (
 
     from typed
 
+),
+
+with_concept_meta as (
+
+    select
+        c.*,
+        coalesce(m.sign_convention, 'any')        as sign_convention,
+        coalesce(m.restatement_eligible, true)    as restatement_eligible
+    from classified c
+    left join {{ ref('concepts') }} m using (concept)
+
 )
 
-select *
-from classified
+select
+    * exclude (value, sign_convention),
+    sign_convention,
+    case
+        when sign_convention = 'always_positive' and value < 0 then abs(value)
+        else value
+    end                                                          as value,
+    sign_convention = 'always_positive' and value < 0            as sign_was_negative
+
+from with_concept_meta
 where period_fiscal_year >= {{ var("min_fiscal_year") }}
   -- A fact filed before the period it describes has ended is impossible;
   -- such rows indicate a tagging error and would poison point-in-time logic.
