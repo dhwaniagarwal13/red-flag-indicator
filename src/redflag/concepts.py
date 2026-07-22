@@ -31,6 +31,22 @@ splits (a healthy, disclosed, unrelated event) and are also unusually prone to
 filer scale/unit typos. Both would contaminate a restatement-based risk score,
 so such concepts are excluded from that particular use — while still being kept
 in the fact table for anyone who wants them for other purposes.
+
+``combine`` — the tag list for most concepts holds *alternatives*: a company
+uses exactly one of them, so picking the first available (by priority) is
+correct. A handful of concepts instead see genuine *components* tagged
+side by side in the same filing: several companies (GE, Honeywell, Lockheed,
+Cisco, Adobe, Bausch — six of twenty-three in this pilot) split cost of
+revenue into `CostOfGoodsSold` (products) + `CostOfServices` (services) as two
+simultaneous, additive line items rather than reporting one combined figure.
+Treating that pair as alternatives and picking the higher-priority one — the
+naive approach this project shipped with initially — silently discards the
+services component and understates COGS. ``combine="sum"`` tells the staging
+layer to add every distinct tag present in a filing instead of picking one;
+``combine="best"`` (default) keeps the original pick-one behaviour for
+concepts where that's actually correct (e.g. revenue: a company reporting
+`Revenues` is not additionally reporting `SalesRevenueNet` for the same
+period — those really are alternatives, never simultaneous components).
 """
 
 from __future__ import annotations
@@ -49,6 +65,7 @@ class Concept:
     required: bool = True  # if False, absence is expected for some filers
     sign_convention: str = "any"  # "any" | "always_positive"
     restatement_eligible: bool = True
+    combine: str = "best"  # "best" | "sum"
 
 
 CONCEPTS: tuple[Concept, ...] = (
@@ -66,6 +83,11 @@ CONCEPTS: tuple[Concept, ...] = (
         "income_statement",
     ),
     Concept(
+        # combine="sum": CostOfGoodsSold and CostOfServices are components
+        # (products vs. services), tagged side by side, not alternatives —
+        # see the module docstring. CostOfGoodsAndServicesSold and
+        # CostOfRevenue are each already a combined total on their own, so
+        # summing is still correct when only one of those appears alone.
         "cogs",
         "duration",
         (
@@ -76,6 +98,7 @@ CONCEPTS: tuple[Concept, ...] = (
         ),
         "income_statement",
         sign_convention="always_positive",
+        combine="sum",
     ),
     Concept("gross_profit", "duration", ("GrossProfit",), "income_statement", required=False),
     Concept("operating_income", "duration", ("OperatingIncomeLoss",), "income_statement"),
@@ -267,6 +290,7 @@ def to_dataframe() -> pd.DataFrame:
             "required": c.required,
             "sign_convention": c.sign_convention,
             "restatement_eligible": c.restatement_eligible,
+            "combine": c.combine,
         }
         for c in CONCEPTS
     )

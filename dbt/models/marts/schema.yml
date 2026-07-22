@@ -24,6 +24,18 @@ models:
       - name: tag_switch_detected
         tests: [not_null]
 
+  - name: fct_beneish_mscore
+    description: >
+      Beneish M-Score, one row per (company, fiscal year). m_score is null
+      (never zero-filled) when any of the 8 inputs is missing; see
+      missing_inputs. See the model SQL and the README's M-Score section for
+      methodology and validation against the case-study companies.
+    columns:
+      - name: entity_id
+        tests: [not_null]
+      - name: period_fiscal_year
+        tests: [not_null]
+
 seeds:
   - name: concepts
     description: Concept metadata exported from redflag.concepts (Python is the source of truth).

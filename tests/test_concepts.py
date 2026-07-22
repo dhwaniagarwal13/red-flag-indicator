@@ -69,5 +69,18 @@ def test_to_dataframe_matches_concept_count():
         "required",
         "sign_convention",
         "restatement_eligible",
+        "combine",
     }
     assert df["concept"].is_unique
+
+
+def test_combine_sum_used_only_where_components_are_genuinely_additive():
+    """combine='sum' should stay rare and deliberate — it changes the meaning
+    of a filing's tags from "pick one" to "add them all", which is only
+    correct for concepts with a documented, verified additive-components case
+    (see cogs: CostOfGoodsSold + CostOfServices, confirmed against real GE/
+    Honeywell/Lockheed/Cisco/Adobe/Bausch filings). A concept flipped to
+    'sum' without that verification would silently double-count for anyone
+    still using it as alternatives."""
+    sum_concepts = {c.name for c in concepts.CONCEPTS if c.combine == "sum"}
+    assert sum_concepts == {"cogs"}

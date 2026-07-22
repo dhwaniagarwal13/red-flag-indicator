@@ -30,7 +30,11 @@ seeds:
 	PYTHONPATH=src $(PY) -m redflag.export_seeds
 
 build: seeds
-	cd dbt && DBT_PROFILES_DIR=. $(DBT) seed
+	# --full-refresh: concepts.csv's columns change often enough during
+	# development that dbt's incremental seed-load can't sniff a schema
+	# change reliably (it errors trying to match the CSV against the old
+	# table shape). The seed is 23 rows — a full reload costs nothing.
+	cd dbt && DBT_PROFILES_DIR=. $(DBT) seed --full-refresh
 	cd dbt && DBT_PROFILES_DIR=. $(DBT) run
 
 test:

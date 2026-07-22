@@ -89,7 +89,8 @@ with_concept_meta as (
     select
         c.*,
         coalesce(m.sign_convention, 'any')        as sign_convention,
-        coalesce(m.restatement_eligible, true)    as restatement_eligible
+        coalesce(m.restatement_eligible, true)    as restatement_eligible,
+        coalesce(m.combine, 'best')               as combine_mode
     from classified c
     left join {{ ref('concepts') }} m using (concept)
 

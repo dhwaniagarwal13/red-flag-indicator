@@ -32,19 +32,33 @@
 
 with annual as (
 
+    -- 'annual' here means "belongs to an annual filing's fiscal-year-end
+    -- picture", not merely period_type='annual'. Balance-sheet concepts
+    -- (total_assets, receivables, ...) are XBRL *instant* facts — an
+    -- as-of-a-date snapshot with no duration — so period_type classifies
+    -- them 'instant', never 'annual'. Filtering on period_type='annual'
+    -- alone silently drops every balance-sheet concept from this table.
+    -- The form filter below already restricts to 10-K/20-F filings, so an
+    -- instant fact surviving it is, by construction, a fiscal-year-end (or
+    -- prior-year-end comparative) balance-sheet snapshot — exactly what a
+    -- point-in-time annual fact table should contain.
     select *
     from {{ ref('stg_facts') }}
-    where period_type = 'annual'
+    where period_type in ('annual', 'instant')
       and form in ('10-K', '10-K/A', '20-F', '20-F/A')
       and unit in ('USD', 'shares')
 
 ),
 
--- Where several acceptable tags appear in the same filing for the same concept,
--- keep the highest-priority one (see concepts.py for the ordering rationale).
-deduped as (
+-- Where several acceptable tags appear in the same filing for the same
+-- concept, most concepts are *alternatives* (a filer uses one or the other,
+-- never both) — keep the highest-priority one present (see concepts.py).
+deduped_best as (
 
-    select *
+    select
+        entity_id, ticker, company_name, concept, source_tag, tag_priority,
+        unit, period_start, period_end, period_fiscal_year, filed_date, form,
+        accession, value, restatement_eligible, sign_was_negative, filing_lag_days
     from (
         select
             *,
@@ -53,8 +67,67 @@ deduped as (
                 order by tag_priority asc, value desc
             ) as rn
         from annual
+        where combine_mode = 'best'
     )
     where rn = 1
+
+),
+
+-- A few concepts (currently: cogs) instead see genuine *components* tagged
+-- side by side in the same filing — six companies in this pilot (GE,
+-- Honeywell, Lockheed, Cisco, Adobe, Bausch) split cost of revenue into
+-- CostOfGoodsSold + CostOfServices as two simultaneous line items. Picking
+-- one (the deduped_best approach) silently discards the other and understates
+-- the total. Sum every distinct tag present instead. source_tag becomes a
+-- synthetic label ("CostOfGoodsSold+CostOfServices") — this is deliberate: if
+-- a company later switches to reporting one combined tag instead of the split
+-- pair, that's a genuine presentation change and should still surface as a
+-- tag switch downstream, not be silently absorbed as if nothing happened.
+deduped_sum as (
+
+    select
+        entity_id,
+        any_value(ticker)                                         as ticker,
+        any_value(company_name)                                   as company_name,
+        concept,
+        string_agg(distinct source_tag, '+' order by source_tag)  as source_tag,
+        min(tag_priority)                                         as tag_priority,
+        any_value(unit)                                           as unit,
+        any_value(period_start)                                   as period_start,
+        period_end,
+        any_value(period_fiscal_year)                             as period_fiscal_year,
+        any_value(filed_date)                                     as filed_date,
+        any_value(form)                                           as form,
+        accession,
+        sum(tag_value)                                            as value,
+        any_value(restatement_eligible)                           as restatement_eligible,
+        bool_or(sign_was_negative)                                as sign_was_negative,
+        any_value(filing_lag_days)                                as filing_lag_days
+    from (
+        -- Collapse exact duplicate rows per tag first, so a repeated fact
+        -- (shouldn't happen, but don't trust it blindly) can't double-count.
+        select
+            entity_id, concept, period_end, accession, source_tag,
+            ticker, company_name, unit, period_start, period_fiscal_year,
+            filed_date, form, tag_priority, restatement_eligible, filing_lag_days,
+            max(value)                 as tag_value,
+            bool_or(sign_was_negative) as sign_was_negative
+        from annual
+        where combine_mode = 'sum'
+        group by
+            entity_id, concept, period_end, accession, source_tag,
+            ticker, company_name, unit, period_start, period_fiscal_year,
+            filed_date, form, tag_priority, restatement_eligible, filing_lag_days
+    )
+    group by entity_id, concept, period_end, accession
+
+),
+
+deduped as (
+
+    select * from deduped_best
+    union all
+    select * from deduped_sum
 
 ),
 
