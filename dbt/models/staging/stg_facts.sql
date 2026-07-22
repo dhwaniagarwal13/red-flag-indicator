@@ -50,8 +50,26 @@ typed as (
         accession,
         cast(value as double)                   as value,
 
-        -- the period's own fiscal year, not the filing's
-        year(cast(period_end as date))          as period_fiscal_year,
+        -- The period's own fiscal year, not the filing's — but not simply
+        -- year(period_end) either. Several 52/53-week fiscal calendars (JNJ,
+        -- KHC in this pilot) land their fiscal year end on the Saturday
+        -- nearest Dec 31, which occasionally falls in early January of the
+        -- *next* calendar year (e.g. 2012-01-01 is the end of JNJ's fiscal
+        -- 2011, not fiscal 2012). Naively taking year(period_end) collided
+        -- that Jan-1 snapshot with the real fiscal-2012 year-end
+        -- (2012-12-30) under the same period_fiscal_year label, which fanned
+        -- out into duplicate rows wherever a downstream model self-joins
+        -- year-over-year (M-Score, Z-Score, F-Score all do). Only shift a
+        -- period ending in the first ten days of January back a year;
+        -- anything else (including genuine non-calendar fiscal years like
+        -- Microsoft's June 30 or Walmart's Jan 31) is left untouched —
+        -- shifting broadly (e.g. "back 6 months") would relabel those
+        -- correctly-dated fiscal years incorrectly instead.
+        case
+            when month(cast(period_end as date)) = 1 and day(cast(period_end as date)) <= 10
+            then year(cast(period_end as date)) - 1
+            else year(cast(period_end as date))
+        end                                      as period_fiscal_year,
 
         case
             when period_start is null then null

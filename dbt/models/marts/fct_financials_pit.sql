@@ -30,23 +30,48 @@
 -- filings — that is GE's real, documented 2018-19 accounting restatement,
 -- and it still shows up here.
 
-with annual as (
+-- Balance-sheet concepts (total_assets, receivables, ...) are XBRL *instant*
+-- facts — an as-of-a-date snapshot with no duration — so period_type
+-- classifies them 'instant', never 'annual'. The original version of this
+-- model assumed any instant fact surviving the form filter (10-K/20-F) was,
+-- by construction, a genuine fiscal-year-end snapshot. Kraft Heinz proved
+-- that assumption wrong: its 10-Ks include a supplementary quarterly-data
+-- table (a common post-merger recast disclosure — KHC merged with Heinz in
+-- 2015), so instant facts dated at quarter-ends (2017-04-01, 2017-07-01, ...)
+-- were being accepted as if they were annual snapshots, producing up to 16
+-- spurious "period" rows for a single real fiscal year. Anchoring instant
+-- facts to a period_end that a genuine annual *duration* fact (already
+-- correctly restricted to 350-380-day periods) also reports for the same
+-- filing fixes this: a quarter-end date with no matching annual duration fact
+-- in the same accession is excluded.
+with annual_period_ends as (
 
-    -- 'annual' here means "belongs to an annual filing's fiscal-year-end
-    -- picture", not merely period_type='annual'. Balance-sheet concepts
-    -- (total_assets, receivables, ...) are XBRL *instant* facts — an
-    -- as-of-a-date snapshot with no duration — so period_type classifies
-    -- them 'instant', never 'annual'. Filtering on period_type='annual'
-    -- alone silently drops every balance-sheet concept from this table.
-    -- The form filter below already restricts to 10-K/20-F filings, so an
-    -- instant fact surviving it is, by construction, a fiscal-year-end (or
-    -- prior-year-end comparative) balance-sheet snapshot — exactly what a
-    -- point-in-time annual fact table should contain.
-    select *
+    select distinct entity_id, accession, period_end
     from {{ ref('stg_facts') }}
-    where period_type in ('annual', 'instant')
+    where period_type = 'annual'
       and form in ('10-K', '10-K/A', '20-F', '20-F/A')
-      and unit in ('USD', 'shares')
+
+),
+
+annual as (
+
+    select sf.*
+    from {{ ref('stg_facts') }} sf
+    where sf.form in ('10-K', '10-K/A', '20-F', '20-F/A')
+      and sf.unit in ('USD', 'shares')
+      and (
+            sf.period_type = 'annual'
+            or (
+                sf.period_type = 'instant'
+                and exists (
+                    select 1
+                    from annual_period_ends ape
+                    where ape.entity_id   = sf.entity_id
+                      and ape.accession   = sf.accession
+                      and ape.period_end  = sf.period_end
+                )
+            )
+          )
 
 ),
 

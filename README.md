@@ -5,16 +5,18 @@ as-filed financial statements, reconstructs what was knowable on any past date,
 and ranks companies on the standard forensic metrics — Beneish M-Score, Altman
 Z-Score, Piotroski F-Score, accrual quality, and Benford's-Law digit analysis.
 
-**Status: Beneish M-Score and Altman Z-Score both live.** Ingestion, staging
-and the point-in-time fact table run end to end on a 23-company pilot; the
-restatement-detection artifacts found in Phase 1 are fixed and
-regression-tested; M-Score shows a genuine hit on Under Armour's FY2015
-channel-stuffing year; and Z-Score (now pulling in a second data source —
-market prices) shows Kraft Heinz and Bausch Health sitting in chronic
-"distress" territory, consistent with their real post-merger leverage.
-Piotroski F-Score is next. See [Current findings](#current-findings) for the
-restatement-layer results, [M-Score](#beneish-m-score) and
-[Z-Score](#altman-z-score) for the scoring results.
+**Status: all three scoring models live** — Beneish M-Score, Altman Z-Score,
+and Piotroski F-Score. Ingestion, staging and the point-in-time fact table run
+end to end on a 23-company pilot; the restatement-detection artifacts found in
+Phase 1 are fixed and regression-tested; M-Score and F-Score independently
+converge on Under Armour's FY2015 channel-stuffing year (a manipulation
+signal and a fundamentals collapse, from two unrelated models); and Z-Score
+(pulling in a second data source, market prices) shows Kraft Heinz and Bausch
+Health sitting in chronic "distress" territory, consistent with their real
+post-merger leverage. See [Current findings](#current-findings) for the
+restatement-layer results, and [M-Score](#beneish-m-score),
+[Z-Score](#altman-z-score), [F-Score](#piotroski-f-score) for the scoring
+results.
 
 ---
 
@@ -54,10 +56,11 @@ fct_financials_pit                           │   nearest trading-day close
   bitemporal; restatement only                │   on/before each fiscal year end
   within a consistent tag lineage            │
       │◄─────────────────────────────────────┘
-      ├──► fct_beneish_mscore     8 indices + composite, per company-year
-      └──► fct_altman_zscore      5 factors + composite, per company-year
+      ├──► fct_beneish_mscore      8 indices + composite, per company-year
+      ├──► fct_altman_zscore       5 factors + composite, per company-year
+      └──► fct_piotroski_fscore    9 binary signals + composite, per company-year
                   ▼
-          (next) fct_fscore → Power BI / Tableau Public
+          (next) Power BI / Tableau Public
 ```
 
 `dbt/seeds/concepts.csv` is a generated artefact (`make seeds` /
@@ -320,6 +323,91 @@ earnings quality and the other measures solvency.
 
 ---
 
+## Piotroski F-Score
+
+`fct_piotroski_fscore` computes the original 2000 model, one row per
+company-fiscal-year: nine binary signals, 1 point each, summed 0–9.
+
+```
+Profitability (4):  positive ROA · positive CFO · ROA improved YoY · CFO > net income (earnings quality)
+Leverage/liquidity (3):  leverage ratio decreased · current ratio improved · no new shares issued
+Efficiency (2):  gross margin improved YoY · asset turnover improved YoY
+```
+
+F ≥ **8** "strong", F ≤ **2** "weak", otherwise "neutral". Where M-Score
+hunts for manipulation and Z-Score measures solvency risk, F-Score is this
+project's only **positive** signal — fundamental strength, not another way to
+find trouble. All nine signals compare each year's own `is_first_report`
+value against the prior year's, on the same basis both times — unlike
+Z-Score's X4, nothing here is multiplied by a price, so there's no
+split-adjustment mismatch to guard against.
+
+### Two more bugs — this time in the shared point-in-time layer itself
+
+Building the third model on the same foundation the first two already used
+still turned up two more real bugs, both structural rather than
+concept-specific — meaning they'd silently affected M-Score and Z-Score too,
+just not enough to surface as obviously as they did here (F-Score's
+year-over-year self-join fans out visibly on any duplicate row; the other two
+models' pivots are less exposed to it).
+
+1. **A supplementary quarterly-data table leaked into the annual snapshot
+   logic.** Kraft Heinz's 10-Ks include a quarterly-data table (a common
+   post-merger recast disclosure — KHC merged with Heinz in 2015), and
+   Phase 1b's assumption that *"any instant fact surviving the 10-K/20-F form
+   filter is a genuine fiscal-year-end snapshot"* turned out to be wrong for
+   this filer: instant facts dated at quarter-ends (2017-04-01, 2017-07-01,
+   ...) were being accepted as annual balance-sheet snapshots, producing up
+   to **16 spurious rows for one real fiscal year**. Fixed by anchoring
+   instant facts to a `period_end` that a genuine annual *duration* fact
+   (already correctly restricted to 350–380-day periods) also reports for the
+   same filing — a quarter-end date with no matching annual duration fact in
+   the same accession is now excluded. Locked in as
+   `assert_khc_quarterly_snapshots_excluded.sql`.
+
+2. **52/53-week fiscal calendars collided two different years under one
+   label.** `period_fiscal_year` was derived as `year(period_end)` — fine for
+   a company whose fiscal year ends near mid-year or on Dec 31, wrong for one
+   whose 52/53-week fiscal year end lands in the *first few days of January*.
+   JNJ's fiscal 2011 ends **2012-01-01**; naive `year()` labelled that
+   `period_fiscal_year = 2012`, colliding with the *real* fiscal 2012
+   (ending 2012-12-30) under the same label. Both models that self-join
+   year-over-year for signals — which is all three scores — then fanned
+   that single mislabelled row out into duplicates. Fixed narrowly: only a
+   `period_end` in the first ten days of January shifts back a year;
+   everything else (including genuinely non-calendar fiscal years like
+   Microsoft's June 30 or Walmart's Jan 31) is left untouched — shifting
+   broadly (e.g. "back 6 months") was considered and rejected, because it
+   would have *mis*labelled those correctly-dated fiscal years instead of
+   fixing anything. Locked in as
+   `assert_unique_first_report_per_fiscal_year.sql`, which checks the
+   invariant directly (exactly one `is_first_report` row per company-concept-
+   fiscal-year) rather than re-deriving the specific dates, so it would catch
+   a *different* fiscal-calendar collision too, not just this one.
+
+Coverage: **240 of 354 pilot company-years (68%)**.
+
+### Validation against the case-study companies
+
+| Company | What happened | What the F-Score shows |
+|---|---|---|
+| **Under Armour** | SEC channel-stuffing charge | **A genuine, independent hit.** FY2015 scores **1 of 9** ("weak") — UAA's single lowest score across its entire 12-year scored history (every other year: 3–8). Only `positive_roa` passes; `positive_cfo` and `earnings_quality` (CFO > net income) both fail — nominally profitable (consistent with hitting a growth target) while cash generation and every other fundamental signal deteriorated simultaneously. This is a *different* model catching the *same* year M-Score flagged, through entirely different signals — not the same finding twice |
+| **Kraft Heinz** | SEC procurement/COGS action, disclosed 2019 | No signal on the relevant years (2016–2019 sit in the 5–6 "neutral" band, unremarkable). FY2023 scores 8 ("strong") — ordinary post-recovery business, not tied to the scandal |
+| **Bausch Health** | Chronic post-acquisition leverage (the Z-Score finding) | Mostly 3–7 "neutral" across its scored years — F-Score doesn't independently flag BHC, which is coherent: F-Score's leverage signal only checks the *direction* of change (did leverage go up or down this year), not the *level* — a company can be chronically over-leveraged (Z-Score's finding) while still occasionally deleveraging year-over-year (F-Score's signal). The two models are answering different questions, not disagreeing |
+| **GE, Hertz, Wells Fargo, Luckin Coffee** | Various | **Unscoreable**, for the same structural reasons documented under M-Score and Z-Score (unclassified balance sheets pre-restructuring; no COGS concept for a bank; thin 20-F tagging) |
+| **Baseline** (AAPL, MSFT, JNJ, PG, KO, WMT, HD, TXN) | No known issues | 4–8, mostly "neutral" with AAPL at "strong" (8) — a healthy, unremarkable spread. Not every signal fires every year for a fine company, which is exactly the point: UAA's 2015 collapse to a single passing signal is the outlier, not the norm |
+
+Read honestly: **one strong, independently-corroborating hit (UAA), one
+appropriately quiet result with a coherent explanation for why (BHC — a
+leverage-direction signal doesn't contradict a leverage-level finding), one
+non-finding on the scandal years (KHC), and the same coverage-gap companies as
+before.** The most valuable result here isn't the UAA hit in isolation — it's
+that M-Score and F-Score, built independently on different signal
+combinations, converge on the same company-year without having been tuned to
+agree.
+
+---
+
 ## Known limitations
 
 - **Survivorship bias in the universe.** SEC's ticker map lists only *current*
@@ -356,6 +444,23 @@ earnings quality and the other measures solvency.
   [Z-Score](#altman-z-score) for why an ADR doesn't reliably convert to a
   per-ordinary-share market cap without a verified ADR ratio this project
   doesn't currently source.
+- **68% company-year coverage on F-Score**, same structural gaps as the other
+  two models (banks, GE/Hertz's unclassified balance sheets, Luckin's thin
+  20-F tagging).
+- **F-Score's leverage signal checks direction, not level.** A chronically
+  over-leveraged company (Bausch Health) can still score a passing leverage
+  signal in a year it deleverages even slightly — that's a feature of what
+  the signal is designed to measure, not a bug, but it means F-Score and
+  Z-Score can legitimately disagree on the same company without either being
+  wrong.
+- **Two more real bugs were found building F-Score**, in shared
+  infrastructure (`fct_financials_pit`/`stg_facts`) that M-Score and Z-Score
+  were already quietly relying on — see [F-Score](#piotroski-f-score). Worth
+  naming as a pattern, not just a one-off: each new model built on this
+  foundation has found at least one real bug the previous ones didn't
+  surface, simply because a self-join or a new concept combination exercises
+  the data differently. There is no strong reason to assume the foundation is
+  now bug-free rather than just less obviously buggy.
 
 ## Roadmap
 
@@ -363,7 +468,7 @@ earnings quality and the other measures solvency.
 - [x] Phase 1b — fix tag/sign/units contamination above
 - [x] Phase 3a — Beneish M-Score, validated against case studies
 - [x] Phase 3b — Altman Z-Score, validated against case studies (adds a second data source: market prices)
-- [ ] Phase 3c — Piotroski F-Score
+- [x] Phase 3c — Piotroski F-Score, validated against case studies
 - [ ] Phase 2 — expand to S&P 500 (deliberately after the metric layer is proven, not before)
 - [ ] Phase 4 — formal validation: full case backtest + accrual forward-return test
 - [ ] Phase 5 — Power BI screener + Tableau Public mirror
