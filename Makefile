@@ -7,7 +7,7 @@ UNIVERSE ?= pilot
 # not just from inside dbt/.
 export REDFLAG_ROOT := $(CURDIR)
 
-.PHONY: help install fetch-sp500 ingest ingest-prices seeds build test all clean
+.PHONY: help install fetch-sp500 ingest ingest-prices seeds build test all sloan-test clean
 
 help:
 	@echo "make install           create venv and install deps"
@@ -17,6 +17,7 @@ help:
 	@echo "make seeds             export concepts.py metadata to dbt/seeds/"
 	@echo "make build             seeds + run dbt models"
 	@echo "make test              run dbt tests + pytest"
+	@echo "make sloan-test        print the Sloan (1996) accrual anomaly report (Phase 4)"
 	@echo "make all               ingest + ingest-prices + build + test"
 	@echo "make clean             drop generated data (keeps the raw cache)"
 
@@ -48,6 +49,9 @@ build: seeds
 test:
 	cd dbt && DBT_PROFILES_DIR=. $(DBT) test
 	PYTHONPATH=src $(PY) -m pytest -q
+
+sloan-test:
+	PYTHONPATH=src $(PY) -m redflag.sloan_test
 
 all: ingest ingest-prices build test
 

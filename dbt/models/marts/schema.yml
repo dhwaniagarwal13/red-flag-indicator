@@ -60,6 +60,45 @@ models:
       - name: period_fiscal_year
         tests: [not_null]
 
+  - name: fct_financials_asof
+    description: >
+      Point-in-time "as of" panel for Phase 4's case backtest -- pivoted
+      financials per (backtest event, company, fiscal year), restricted to
+      fiscal years whose 10-K/20-F was public by that event's as_of_date. See
+      the model SQL and dbt/seeds/backtest_events.csv.
+    columns:
+      - name: entity_id
+        tests: [not_null]
+      - name: event_label
+        tests: [not_null]
+      - name: as_of_date
+        tests: [not_null]
+
+  - name: fct_scores_asof
+    description: >
+      M-Score/Z-Score/F-Score recomputed on fct_financials_asof -- "what
+      would this screen have shown as of each backtest event's as_of_date."
+      Formulas are a deliberate, tested-against-drift duplication of the
+      three production marts; see assert_asof_reconciles_with_production.sql.
+    columns:
+      - name: event_ticker
+        tests: [not_null]
+      - name: period_fiscal_year
+        tests: [not_null]
+
+  - name: fct_accrual_returns
+    description: >
+      Sloan (1996)-style accrual anomaly test: each company-fiscal-year's
+      TATA accrual measure (reused from fct_beneish_mscore) paired with its
+      12-month forward stock return, entered the first trading day on or
+      after the 10-K became public (not period_end) to avoid lookahead. See
+      src/redflag/sloan_test.py for the portfolio-sort statistical test.
+    columns:
+      - name: entity_id
+        tests: [not_null]
+      - name: period_fiscal_year
+        tests: [not_null]
+
 seeds:
   - name: concepts
     description: Concept metadata exported from redflag.concepts (Python is the source of truth).
@@ -72,4 +111,17 @@ seeds:
               arguments:
                 values: ["any", "always_positive"]
       - name: restatement_eligible
+        tests: [not_null]
+
+  - name: backtest_events
+    description: >
+      (ticker, as_of_date) pairs for Phase 4's point-in-time case backtest --
+      one "pre_disclosure" row per case-study company (as_of_date shortly
+      after their last pre-scandal 10-K/20-F was filed) plus a "full_history"
+      control row (as_of_date 2099-01-01) used to reconcile fct_scores_asof
+      against the production marts.
+    columns:
+      - name: ticker
+        tests: [not_null]
+      - name: as_of_date
         tests: [not_null]

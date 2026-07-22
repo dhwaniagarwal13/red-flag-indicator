@@ -5,19 +5,25 @@ as-filed financial statements, reconstructs what was knowable on any past date,
 and ranks companies on the standard forensic metrics — Beneish M-Score, Altman
 Z-Score, Piotroski F-Score, accrual quality, and Benford's-Law digit analysis.
 
-**Status: scaled to the S&P 500.** All three scoring models (Beneish M-Score,
-Altman Z-Score, Piotroski F-Score) are live, tested, and now run across 501
+**Status: formally validated.** All three scoring models (Beneish M-Score,
+Altman Z-Score, Piotroski F-Score) are live, tested, and run across 501
 companies / 7,554 company-years — not just the 23-company pilot they were
 built and validated on. Scaling up surfaced three more real bugs (see
 [Scaling to the S&P 500](#scaling-to-the-sp-500)), on top of the eight found
 building the models themselves. M-Score and F-Score independently converge on
 Under Armour's FY2015 channel-stuffing year; Z-Score shows Kraft Heinz and
 Bausch Health sitting in chronic "distress" territory, consistent with their
-real post-merger leverage. See [Current findings](#current-findings) for the
-restatement-layer results, [M-Score](#beneish-m-score),
-[Z-Score](#altman-z-score), [F-Score](#piotroski-f-score) for the pilot-scale
-validation, and [Scaling to the S&P 500](#scaling-to-the-sp-500) for what
-changed at scale.
+real post-merger leverage. [Phase 4](#phase-4-formal-validation) then tested
+the point-in-time architecture itself against the calendar: querying the
+screen "as of" a date shortly after UAA's FY2015 10-K was filed reproduces
+the same M-Score/F-Score hit **3.7 years before** the federal investigation
+became public, and a Sloan (1996)-style accrual/forward-return test on the
+whole panel finds the predicted sign, though not a clean monotonic effect.
+See [Current findings](#current-findings) for the restatement-layer results,
+[M-Score](#beneish-m-score), [Z-Score](#altman-z-score),
+[F-Score](#piotroski-f-score) for the pilot-scale validation,
+[Scaling to the S&P 500](#scaling-to-the-sp-500) for what changed at scale,
+and [Phase 4](#phase-4-formal-validation) for the case backtest and accrual test.
 
 ---
 
@@ -59,7 +65,9 @@ fct_financials_pit                           │   nearest trading-day close
       │◄─────────────────────────────────────┘
       ├──► fct_beneish_mscore      8 indices + composite, per company-year
       ├──► fct_altman_zscore       5 factors + composite, per company-year
-      └──► fct_piotroski_fscore    9 binary signals + composite, per company-year
+      ├──► fct_piotroski_fscore    9 binary signals + composite, per company-year
+      ├──► fct_accrual_returns     TATA vs. 12-month forward return (Sloan test)
+      └──► fct_financials_asof ──► fct_scores_asof   "as of a past date" case backtest
                   ▼
           (next) Power BI / Tableau Public
 ```
@@ -96,6 +104,9 @@ make all          # ingest -> ingest-prices -> seeds -> dbt run -> dbt test -> p
 `make all UNIVERSE=full` ingests and scores the full universe. Budget real
 time for this — EDGAR is rate-limited and price history is fetched one
 ticker at a time (~500 companies takes several minutes for each).
+
+`make sloan-test` prints the [Sloan accrual anomaly](#the-sloan-1996-accrual-forward-return-test)
+report after `make all` has built `fct_accrual_returns`.
 
 No absolute paths anywhere in the code — everything resolves from the repo
 root (`redflag.config.ROOT`, or `$REDFLAG_ROOT` for dbt). One thing that *is*
@@ -509,6 +520,107 @@ M-Score 42% (was 55%), Z-Score 65% (was 67%), F-Score 47% (was 68%).
 
 ---
 
+## Phase 4: formal validation
+
+Two things "point-in-time" had never actually been tested end to end: whether
+a query run *on a specific past date* would have shown what this project
+claims it would, and whether the accrual signal underlying M-Score's TATA
+term (and F-Score's earnings-quality signal) predicts anything about future
+stock returns the way the accounting literature says it should. Both needed
+new machinery, not just new SQL on the existing marts.
+
+### The "as of" case backtest
+
+Everything before this phase answers "what does fiscal year Y's own first
+filing say" — `is_first_report` is a fixed property of a row, not a function
+of when you're asking. A genuine backtest needs a query date: `fct_financials_asof`
+adds it, cross-joining the point-in-time base data against
+`dbt/seeds/backtest_events.csv` (one `as_of_date` per case-study company,
+shortly after their last pre-scandal 10-K/20-F was filed) and keeping only
+fiscal years whose filing was `first_filed_date <= as_of_date`.
+`fct_scores_asof` recomputes M-Score/Z-Score/F-Score on top of it.
+
+That model duplicates the three production marts' formulas rather than
+sharing macros with them — a deliberate tradeoff, not an oversight. Refactoring
+three already-validated, heavily-tested models to share code with a new,
+unproven one risked exactly the kind of regression this project has spent
+three phases hunting. Instead, `backtest_events.csv` includes a `full_history`
+control row per company (`as_of_date` 2099-01-01 — every filing seen so far),
+and `assert_asof_reconciles_with_production.sql` checks that duplicate scores
+production exactly, company-year for company-year. It passes. If the two
+copies ever drift, that test catches it before a wrong "as of" number does.
+
+| Company | As-of date (shortly after the relevant 10-K/20-F) | Public disclosure | Lead time | What the screen showed, using only what was filed by then |
+|---|---|---|---|---|
+| **Under Armour** | 2016-02-25 (FY2015 10-K) | 2019-11-03 (WSJ/Bloomberg report federal probe) | **3.7 years** | **A genuine hit, on both models, using only the as-filed FY2015 10-K.** M-Score -0.997 (FY2015's single most elevated year across its whole scored history) and F-Score 1/9 ("weak", FY2015's single lowest year) — both already computable in February 2016, more than three and a half years before the public knew to look, and over five years before the May 2021 SEC settlement |
+| **Kraft Heinz** | 2018-02-19 (FY2017 10-K) | 2019-02-21 (SEC subpoena + $15.4B writedown disclosed) | 1.0 year | Partial. Only FY2015's Z-Score is computable that early (0.853, "distress") — coverage this early in KHC's panel is thin, same structural gap already documented in [Z-Score](#altman-z-score). M-Score and F-Score are unscoreable at this as-of date |
+| **Bausch Health** | 2015-02-28 (FY2014 10-K) | 2015-10-15 (Philidor scandal first reported) | 7.5 months | **No dramatic flag**, consistent with the production finding. M-Score -2.513 (unremarkable), F-Score 7/9 ("neutral-to-strong"). Z-Score 1.912 ("grey", borderline) — a mild signal, not a spike, consistent with chronic leverage rather than a 2014-specific event |
+| **GE** | 2017-02-27 (FY2016 10-K, the restated-OCF year) | 2019-08-15 (Markopolos "bigger fraud than Enron" report) | 2.5 years | Unscoreable on all three models, even 2.5 years out — confirms the coverage gap is structural (missing `current_assets` pre-FY2019), not a timing artifact |
+| **Hertz** | 2020-02-28 (FY2019 10-K) | 2020-05-22 (Chapter 11 filed) | 3 months | Unscoreable — zero Z-Score coverage right up to three months before the bankruptcy filing itself, the single most relevant test in this whole project. A real, honestly-reported gap, not a near-miss |
+| **Wells Fargo** | 2016-02-27 (FY2015 10-K) | 2016-09-08 (CFPB/OCC settlement) | 6.5 months | Unscoreable — no COGS concept for a bank, same structural limitation as the production marts |
+| **Luckin Coffee** | 2020-04-05 (3 days after disclosure) | 2020-04-02 (fraud disclosed) | n/a | **Zero rows.** FY2019's 20-F wasn't filed until 2021-06-30 — fourteen months *after* the fraud was already public. This is a different failure mode than GE/HTZ/WFC's coverage gaps: there was no filing for the screen to evaluate yet, at any lead time, because the fraud broke faster than the annual-report cadence this whole project depends on |
+
+Read honestly: **one clean, mechanistically independent double-hit years
+ahead of the public record (UAA), one partial early signal limited by early-panel
+coverage (KHC), one correctly quiet result (BHC), and four cases —
+GE, Hertz, Wells Fargo, Luckin Coffee — where the "as of" test doesn't add a
+new finding so much as prove the existing coverage gaps aren't timing
+artifacts that a longer lead time would have fixed.** UAA is the case that
+actually validates the whole premise of this project: the red flag was sitting
+in as-filed data years before anyone but the company itself and the SEC's
+eventual investigators had reason to look.
+
+### The Sloan (1996) accrual forward-return test
+
+Sloan's finding: firms with high accruals (earnings running well ahead of
+cash flow) subsequently earn *lower* stock returns than low-accrual firms,
+because the market doesn't fully price the lower persistence of the accrual
+component of earnings. `fct_accrual_returns` reuses TATA — already computed
+and validated as one of Beneish M-Score's 8 indices — paired with each
+company-year's forward 12-month return, entered on the first trading day
+**on or after** the 10-K's `first_filed_date` (not `period_end`, and never
+before it — the position can't open before the information that motivates it
+existed) and exited 12 months later, both nearest-trading-day joins with a
+10-day tolerance. Companies are sorted into accrual quintiles *within* each
+fiscal year (cross-sectional, standard methodology — comparing a 2010 accrual
+level against a 2022 one without conditioning on the year would just measure
+which years had better markets). `src/redflag/sloan_test.py`
+(`make sloan-test`) runs the portfolio sort and a Welch t-test on the
+Q1-minus-Q5 hedge return.
+
+12,951 company-years across 16 fiscal years have both a computable TATA and a
+priced 12-month forward return:
+
+| Quintile (1=lowest accruals, 5=highest) | n | mean TATA | mean return | median return |
+|---|---|---|---|---|
+| 1 | 2,596 | -0.114 | 23.02% | 16.14% |
+| 2 | 2,592 | -0.056 | 14.44% | 12.35% |
+| 3 | 2,590 | -0.037 | 12.82% | 10.28% |
+| 4 | 2,587 | -0.020 | 13.60% | 11.61% |
+| 5 | 2,586 | 0.020 | 14.58% | 10.97% |
+
+Hedge return (Q1 minus Q5), means: **+8.44%**, Welch t = 7.01 (p < 0.0001).
+Hedge return, medians: **+5.18%**.
+
+Read honestly, not just headline: the sign is right and the mean-based hedge
+return is statistically decisive, but it is **not** a clean monotonic Sloan
+effect — checked, not assumed, the same way the plausible-range test outliers
+were checked in [Scaling to the S&P 500](#scaling-to-the-sp-500). Quintiles
+2 through 5 sit within about two points of each other; nearly the entire
+effect is Q1 running far above the rest. Q1's top names by forward return are
+AMD (FY2015), Tesla (FY2012, FY2019), AppLovin (FY2022-23), Palantir (FY2023)
+and CrowdStrike (FY2019-20) — hyper-growth names whose deeply negative TATA
+reflects heavy stock-based comp and R&D outrunning reported earnings, not the
+conservative-accounting story Sloan's original manufacturing-era sample was
+built on, and several of them happened to be among the market's best-performing
+stocks of the decade. The median-based hedge return (+5.18%, versus +8.44% for
+the mean) is the more honest read of the typical company in each quintile: a
+real, positive, directionally-Sloan-consistent gap between Q1 and Q5, several
+times smaller than the mean makes it look, and driven by the whole distribution
+shifting down from Q1 to Q3 rather than a smooth decline all the way to Q5.
+
+---
+
 ## Known limitations
 
 - **Survivorship bias in the universe.** SEC's ticker map lists only *current*
@@ -581,7 +693,7 @@ M-Score 42% (was 55%), Z-Score 65% (was 67%), F-Score 47% (was 68%).
 - [x] Phase 3b — Altman Z-Score, validated against case studies (adds a second data source: market prices)
 - [x] Phase 3c — Piotroski F-Score, validated against case studies
 - [x] Phase 2 — expand to the S&P 500 (501 companies, 7,554 company-years; done after the metric layer was proven, not before)
-- [ ] Phase 4 — formal validation: full case backtest + accrual forward-return test
+- [x] Phase 4 — formal validation: point-in-time case backtest (UAA flagged 3.7 years early) + Sloan (1996) accrual forward-return test
 - [ ] Phase 5 — Power BI screener + Tableau Public mirror
 - [ ] Phase 6 — findings write-up
 
