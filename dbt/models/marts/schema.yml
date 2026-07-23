@@ -99,6 +99,27 @@ models:
       - name: period_fiscal_year
         tests: [not_null]
 
+  - name: fct_dashboard
+    description: >
+      Denormalised, dashboard-ready export: one row per (company, fiscal
+      year) with m_score/z_score/f_score, their standard-threshold flags,
+      sector, and case-study annotation all in one table. Grain is a FULL
+      OUTER JOIN across the three scoring marts, not an inner join -- a
+      company-year missing one score (e.g. a 20-F filer with no z_score)
+      still appears, with that column null. See src/redflag/export_dashboard.py
+      and the README's Phase 5 section for the Power BI / Tableau build spec.
+    columns:
+      - name: entity_id
+        tests: [not_null]
+      - name: ticker
+        tests: [not_null]
+      - name: period_fiscal_year
+        tests: [not_null]
+      - name: red_flag_count
+        tests: [not_null]
+      - name: models_scored
+        tests: [not_null]
+
 seeds:
   - name: concepts
     description: Concept metadata exported from redflag.concepts (Python is the source of truth).
@@ -111,6 +132,17 @@ seeds:
               arguments:
                 values: ["any", "always_positive"]
       - name: restatement_eligible
+        tests: [not_null]
+
+  - name: case_studies
+    description: >
+      Ticker -> why it's a case study, exported from redflag.universe's
+      _CASE_STUDIES (Python is the source of truth). Joined onto
+      fct_dashboard to annotate the known-outcome companies.
+    columns:
+      - name: ticker
+        tests: [not_null, unique]
+      - name: case_study_note
         tests: [not_null]
 
   - name: backtest_events

@@ -7,7 +7,7 @@ UNIVERSE ?= pilot
 # not just from inside dbt/.
 export REDFLAG_ROOT := $(CURDIR)
 
-.PHONY: help install fetch-sp500 ingest ingest-prices seeds build test all sloan-test clean
+.PHONY: help install fetch-sp500 ingest ingest-prices seeds build test all sloan-test dashboard clean
 
 help:
 	@echo "make install           create venv and install deps"
@@ -18,6 +18,7 @@ help:
 	@echo "make build             seeds + run dbt models"
 	@echo "make test              run dbt tests + pytest"
 	@echo "make sloan-test        print the Sloan (1996) accrual anomaly report (Phase 4)"
+	@echo "make dashboard         export data/exports/dashboard.csv for Power BI / Tableau (Phase 5)"
 	@echo "make all               ingest + ingest-prices + build + test"
 	@echo "make clean             drop generated data (keeps the raw cache)"
 
@@ -42,7 +43,8 @@ build: seeds
 	# --full-refresh: concepts.csv's columns change often enough during
 	# development that dbt's incremental seed-load can't sniff a schema
 	# change reliably (it errors trying to match the CSV against the old
-	# table shape). The seed is 23 rows — a full reload costs nothing.
+	# table shape). All three seeds together are ~45 rows — a full reload
+	# costs nothing.
 	cd dbt && DBT_PROFILES_DIR=. $(DBT) seed --full-refresh
 	cd dbt && DBT_PROFILES_DIR=. $(DBT) run
 
@@ -52,6 +54,12 @@ test:
 
 sloan-test:
 	PYTHONPATH=src $(PY) -m redflag.sloan_test
+
+# Kept separate from `build` (like sloan-test): the CSV is only needed when
+# you're about to open the BI dashboard, not on every model rebuild, and the
+# warehouse is queryable directly for everything else.
+dashboard:
+	PYTHONPATH=src $(PY) -m redflag.export_dashboard
 
 all: ingest ingest-prices build test
 

@@ -63,13 +63,17 @@ fct_financials_pit                           │   nearest trading-day close
   bitemporal; restatement only                │   on/before each fiscal year end
   within a consistent tag lineage            │
       │◄─────────────────────────────────────┘
-      ├──► fct_beneish_mscore      8 indices + composite, per company-year
-      ├──► fct_altman_zscore       5 factors + composite, per company-year
-      ├──► fct_piotroski_fscore    9 binary signals + composite, per company-year
-      ├──► fct_accrual_returns     TATA vs. 12-month forward return (Sloan test)
+      ├──► fct_beneish_mscore      8 indices + composite, per company-year   ─┐
+      ├──► fct_altman_zscore       5 factors + composite, per company-year   ─┤
+      ├──► fct_piotroski_fscore    9 binary signals + composite, per company-year ─┤
+      ├──► fct_accrual_returns     TATA vs. 12-month forward return (Sloan test)   │
       └──► fct_financials_asof ──► fct_scores_asof   "as of a past date" case backtest
-                  ▼
-          (next) Power BI / Tableau Public
+                                                                                   │
+   fct_dashboard  ◄────────── denormalised, one wide row per company-year  ◄──────┘
+      │   export_dashboard.py
+      ▼
+   data/exports/dashboard.csv  ──►  Power BI Desktop / Tableau Public
+                                    (plain CSV; no key, no driver, no account)
 ```
 
 `dbt/seeds/concepts.csv` is a generated artefact (`make seeds` /
@@ -107,6 +111,11 @@ ticker at a time (~500 companies takes several minutes for each).
 
 `make sloan-test` prints the [Sloan accrual anomaly](#the-sloan-1996-accrual-forward-return-test)
 report after `make all` has built `fct_accrual_returns`.
+
+`make dashboard` writes `data/exports/dashboard.csv` — the flat file the
+[Power BI / Tableau dashboard](#phase-5-dashboard) reads. No API key, no
+database driver, no account: it's a plain CSV you open with "Get Data >
+Text/CSV".
 
 No absolute paths anywhere in the code — everything resolves from the repo
 root (`redflag.config.ROOT`, or `$REDFLAG_ROOT` for dbt). One thing that *is*
@@ -621,6 +630,107 @@ shifting down from Q1 to Q3 rather than a smooth decline all the way to Q5.
 
 ---
 
+## Phase 5: dashboard
+
+The screen is only useful if you can look at it. Phases 1–4 leave everything
+queryable from SQL and validated by tests, but "run this dbt model and write a
+DuckDB query" is not a way to *explore* 7,554 company-years. Phase 5 adds a
+Power BI screener (with a Tableau Public mirror) sitting on top of a single
+denormalised export.
+
+### No API key, no connection, no account
+
+Worth stating plainly because it's a common and reasonable worry: **nothing in
+this dashboard connects to Claude, to any API, or to any authenticated
+service, and there is no key to obtain anywhere.** Power BI and Tableau here
+are pure visualisers — they read one flat file off your disk and draw charts
+from it. The entire hand-off is:
+
+```
+make build       # dbt builds fct_dashboard inside the DuckDB warehouse
+make dashboard   # export_dashboard.py writes data/exports/dashboard.csv
+                 # → open that CSV in Power BI Desktop / Tableau Public
+```
+
+In Power BI: **Get Data → Text/CSV → pick `dashboard.csv`**. In Tableau:
+**Connect → Text File**. No connection string, no ODBC driver, no login. (The
+tools *can* connect to DuckDB directly via ODBC — that's the road not taken
+here, because it would couple the dashboard to a driver install and this
+machine's file path, against the reproducibility bias in
+[Why point-in-time](#why-point-in-time). A CSV opens anywhere.)
+
+`data/exports/` is git-ignored — the CSV is a build artefact regenerated from
+the warehouse, never committed, same rule as `data/staging`. Publishing to
+Tableau *Public* uploads the CSV to Tableau's cloud; that's a manual step the
+dashboard author takes, not something the repo does for you.
+
+### One table, built once, not three joined at render time
+
+`fct_dashboard` is one wide row per (company, fiscal year): the three composite
+scores, their standard-threshold flags, sector, case-study annotation, and a
+`red_flag_count`, all in one place. It does **not** recompute anything — each
+score is pulled as-is from the already-validated
+[M-Score](#beneish-m-score) / [Z-Score](#altman-z-score) /
+[F-Score](#piotroski-f-score) marts, so there is no way for the dashboard layer
+to disagree with them. Denormalising here rather than joining three fact tables
+inside the BI tool keeps the visual layer simple and puts the join somewhere
+dbt-tested.
+
+Two details that matter for how you read it:
+
+- The grain is a **full outer join** across the three scoring marts, not an
+  inner join. A 20-F filer with no `market_value_of_equity` has no Z-Score some
+  years (see [Z-Score](#altman-z-score)); that company-year still appears, with
+  `z_score` null, rather than vanishing along with its M-Score and F-Score.
+- `red_flag_count` is **null-tolerant**: it counts only the models that actually
+  produced a score, and `models_scored` tells you how many that was. A
+  company-year flagged by the one model that could score it reads as "1 of 1",
+  not diluted against two models that had no data. `assert_dashboard_flag_counts_consistent.sql`
+  enforces `0 ≤ red_flag_count ≤ models_scored ≤ 3`.
+
+The columns in `dashboard.csv`:
+
+| Column | Meaning |
+|---|---|
+| `ticker`, `company_name`, `gics_sector` | Identity + sector (sector is S&P-500-only; null for delisted case studies like LKNCY/HTZ) |
+| `is_case_study`, `case_study_note` | Whether this is a known-outcome test company, and why |
+| `period_fiscal_year`, `period_end` | The fiscal year, derived from the period end (not the filing year) |
+| `m_score`, `z_score`, `z_zone`, `f_score`, `f_band` | The three composite scores as computed in their own marts |
+| `m_score_flag`, `z_score_flag`, `f_score_flag` | Booleans at the published thresholds (below), null when that model couldn't score the year |
+| `red_flag_count`, `models_scored` | How many models flagged / how many produced a score |
+
+### Build spec (what to put on the canvas)
+
+The dashboard is authored by hand in the desktop app — `.pbix`/`.twb` files
+aren't a text format that can be generated from the repo. This is the intended
+layout; every field named below is a column in `dashboard.csv`.
+
+| View | Type | Fields | Notes |
+|---|---|---|---|
+| **Screener** | Sortable table | rows: `ticker`, `period_fiscal_year`; values: `m_score`, `z_score`, `f_score`, `red_flag_count` | Conditional-format the flag columns red when `*_flag = true`; default sort `red_flag_count` desc, then `period_fiscal_year` desc. This is the workhorse view. |
+| **Sector risk** | Heatmap / matrix | rows: `gics_sector`; columns: `period_fiscal_year`; colour: avg `red_flag_count` (or % where `red_flag_count > 0`) | Shows which sectors light up in which years. Exclude null sector or bucket it as "Non-index". |
+| **Case-study spotlight** | Line / scatter | filter: `is_case_study = true`; x: `period_fiscal_year`; y: `m_score` (or a small-multiple of all three); tooltip: `case_study_note` | Overlay each name's disclosure year (from the [Phase 4 table](#the-as-of-case-backtest)) to show the score moving *before* the public event — this is the headline story. |
+| **Distribution** | Histogram | one per score: `m_score`, `z_score`, `f_score`; a slicer on `period_fiscal_year` | Draw the threshold as a reference line so a viewer sees where any given company sits relative to the cut. |
+
+Threshold legend (the same published, static cuts documented in each mart's
+header — a flag is a *screen*, not a verdict):
+
+- **Beneish M-Score** — `m_score_flag = true` when M > **−1.78** (higher =
+  more manipulation-like).
+- **Altman Z-Score** — `z_score_flag = true` in the **distress** zone, Z < 1.81
+  (`z_zone` also carries `grey` 1.81–2.99 and `safe` > 2.99).
+- **Piotroski F-Score** — `f_score_flag = true` in the **weak** band, F ≤ 2
+  (`f_band` also carries `neutral` and `strong` ≥ 8).
+
+Read honestly: a red flag here means "worth a closer look", nothing more. The
+[case backtest](#the-as-of-case-backtest) is the honest guide to what these
+flags do and don't catch — Under Armour lit up years early; GE, Hertz and
+Wells Fargo sit in real, documented coverage gaps and would show blanks on this
+dashboard, not warnings. The dashboard makes the screen explorable; it does not
+make it more certain than the validation says it is.
+
+---
+
 ## Known limitations
 
 - **Survivorship bias in the universe.** SEC's ticker map lists only *current*
@@ -694,7 +804,7 @@ shifting down from Q1 to Q3 rather than a smooth decline all the way to Q5.
 - [x] Phase 3c — Piotroski F-Score, validated against case studies
 - [x] Phase 2 — expand to the S&P 500 (501 companies, 7,554 company-years; done after the metric layer was proven, not before)
 - [x] Phase 4 — formal validation: point-in-time case backtest (UAA flagged 3.7 years early) + Sloan (1996) accrual forward-return test
-- [ ] Phase 5 — Power BI screener + Tableau Public mirror
+- [x] Phase 5 — dashboard: `fct_dashboard` mart + `dashboard.csv` export + build spec for a Power BI screener / Tableau Public mirror (plain CSV, no API key)
 - [ ] Phase 6 — findings write-up
 
 ---

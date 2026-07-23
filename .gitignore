@@ -10,6 +10,7 @@ dist/
 # Data artefacts — regenerable, never committed
 data/raw/
 data/staging/
+data/exports/
 *.duckdb
 *.duckdb.wal
 
