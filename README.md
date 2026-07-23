@@ -73,6 +73,7 @@ fct_financials_pit                           │   nearest trading-day close
       │   export_dashboard.py
       ▼
    data/exports/dashboard.csv  ──►  Power BI Desktop / Tableau Public
+                              └───►  dashboard/index.html @ localhost:8000
                                     (plain CSV; no key, no driver, no account)
 ```
 
@@ -115,7 +116,8 @@ report after `make all` has built `fct_accrual_returns`.
 `make dashboard` writes `data/exports/dashboard.csv` — the flat file the
 [Power BI / Tableau dashboard](#phase-5-dashboard) reads. No API key, no
 database driver, no account: it's a plain CSV you open with "Get Data >
-Text/CSV".
+Text/CSV". `make dashboard-web` does the same export and also serves a
+[local browser dashboard](#the-local-browser-dashboard) at `localhost:8000`.
 
 No absolute paths anywhere in the code — everything resolves from the repo
 root (`redflag.config.ROOT`, or `$REDFLAG_ROOT` for dbt). One thing that *is*
@@ -635,8 +637,8 @@ shifting down from Q1 to Q3 rather than a smooth decline all the way to Q5.
 The screen is only useful if you can look at it. Phases 1–4 leave everything
 queryable from SQL and validated by tests, but "run this dbt model and write a
 DuckDB query" is not a way to *explore* 7,554 company-years. Phase 5 adds a
-Power BI screener (with a Tableau Public mirror) sitting on top of a single
-denormalised export.
+Power BI screener (with a Tableau Public mirror) and a local browser dashboard,
+all sitting on top of a single denormalised export.
 
 ### No API key, no connection, no account
 
@@ -663,6 +665,27 @@ machine's file path, against the reproducibility bias in
 the warehouse, never committed, same rule as `data/staging`. Publishing to
 Tableau *Public* uploads the CSV to Tableau's cloud; that's a manual step the
 dashboard author takes, not something the repo does for you.
+
+### The local browser dashboard
+
+For anyone who doesn't have Power BI or Tableau installed, `dashboard/index.html`
+is a second, self-contained way to look at the same export — a static page
+(vanilla JS, no framework, no build step, no CDN dependency) with a
+sortable/filterable screener table and four charts (M-Score, Z-Score and
+F-Score distributions, plus average red flags by sector).
+
+```
+make dashboard-web    # exports dashboard.csv, then serves the repo at :8000
+                       # open http://localhost:8000/dashboard/
+```
+
+This is `python -m http.server`, not a framework or a backend — the page's
+only network call is a same-origin `fetch()` of `../data/exports/dashboard.csv`.
+That fetch is *why* a server is needed at all: browsers block `fetch()` of
+local files opened directly as `file://`, so double-clicking `index.html`
+won't work — `make dashboard-web` (or any static file server rooted at the
+repo) is required. Nothing here talks to Claude, an API, or the internet;
+`localhost:8000` never leaves your machine. Stop the server with Ctrl+C.
 
 ### One table, built once, not three joined at render time
 
@@ -804,7 +827,7 @@ make it more certain than the validation says it is.
 - [x] Phase 3c — Piotroski F-Score, validated against case studies
 - [x] Phase 2 — expand to the S&P 500 (501 companies, 7,554 company-years; done after the metric layer was proven, not before)
 - [x] Phase 4 — formal validation: point-in-time case backtest (UAA flagged 3.7 years early) + Sloan (1996) accrual forward-return test
-- [x] Phase 5 — dashboard: `fct_dashboard` mart + `dashboard.csv` export + build spec for a Power BI screener / Tableau Public mirror (plain CSV, no API key)
+- [x] Phase 5 — dashboard: `fct_dashboard` mart + `dashboard.csv` export + a local browser dashboard (`make dashboard-web`) + build spec for a Power BI screener / Tableau Public mirror (plain CSV, no API key)
 - [ ] Phase 6 — findings write-up
 
 ---

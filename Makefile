@@ -7,7 +7,7 @@ UNIVERSE ?= pilot
 # not just from inside dbt/.
 export REDFLAG_ROOT := $(CURDIR)
 
-.PHONY: help install fetch-sp500 ingest ingest-prices seeds build test all sloan-test dashboard clean
+.PHONY: help install fetch-sp500 ingest ingest-prices seeds build test all sloan-test dashboard dashboard-web clean
 
 help:
 	@echo "make install           create venv and install deps"
@@ -19,6 +19,7 @@ help:
 	@echo "make test              run dbt tests + pytest"
 	@echo "make sloan-test        print the Sloan (1996) accrual anomaly report (Phase 4)"
 	@echo "make dashboard         export data/exports/dashboard.csv for Power BI / Tableau (Phase 5)"
+	@echo "make dashboard-web     export + serve the local browser dashboard at localhost:8000"
 	@echo "make all               ingest + ingest-prices + build + test"
 	@echo "make clean             drop generated data (keeps the raw cache)"
 
@@ -60,6 +61,14 @@ sloan-test:
 # warehouse is queryable directly for everything else.
 dashboard:
 	PYTHONPATH=src $(PY) -m redflag.export_dashboard
+
+# Serves the repo root (not just dashboard/) so dashboard/index.html's
+# relative fetch of ../data/exports/dashboard.csv resolves. Plain
+# http.server, not a framework: this is a static page reading a static file,
+# nothing here needs a backend, a build step, or a key of any kind.
+dashboard-web: dashboard
+	@echo "Serving at http://localhost:8000/dashboard/  (Ctrl+C to stop)"
+	$(PY) -m http.server 8000
 
 all: ingest ingest-prices build test
 

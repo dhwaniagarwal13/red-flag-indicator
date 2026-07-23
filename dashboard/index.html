@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Red-Flag Screener</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #666; --border: #ddd;
+    --card: #f7f7f8; --accent: #b4232c; --safe: #1a7f37; --grey: #9a6b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14161a; --fg: #e8e8e8; --muted: #9a9a9a; --border: #333;
+             --card: #1e2126; --accent: #ff6b6b; --safe: #4caf6d; --grey: #d0a030; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--fg);
+    font: 14px/1.4 -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 20px; }
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  .stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+          padding: 10px 16px; min-width: 120px; }
+  .stat .n { font-size: 22px; font-weight: 600; }
+  .stat .l { color: var(--muted); font-size: 12px; }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+              margin-bottom: 18px; padding: 12px; background: var(--card);
+              border: 1px solid var(--border); border-radius: 8px; }
+  .controls input, .controls select {
+    background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 8px; font-size: 13px;
+  }
+  .controls label { display: flex; align-items: center; gap: 5px; font-size: 13px; color: var(--muted); }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 12px; margin-bottom: 20px; }
+  .chart-box { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+  .chart-box h3 { margin: 0 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
+  .chart-box .note { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  svg text { fill: var(--fg); font-size: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th { position: sticky; top: 0; background: var(--bg); text-align: left; padding: 8px 10px;
+             border-bottom: 2px solid var(--border); cursor: pointer; white-space: nowrap; }
+  thead th:hover { color: var(--accent); }
+  thead th.sorted::after { content: " " attr(data-dir); }
+  tbody td { padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  tbody tr:hover { background: var(--card); }
+  tbody tr.case-study { font-weight: 600; }
+  .flag-true { color: var(--accent); font-weight: 600; }
+  .flag-false { color: var(--safe); }
+  .flag-null { color: var(--muted); }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; }
+  .badge.distress, .badge.weak { background: var(--accent); color: #fff; }
+  .badge.grey, .badge.neutral { background: var(--grey); color: #fff; }
+  .badge.safe, .badge.strong { background: var(--safe); color: #fff; }
+  .table-wrap { max-height: 65vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .pager { display: flex; gap: 10px; align-items: center; justify-content: center;
+           margin-top: 12px; color: var(--muted); }
+  .pager button { background: var(--card); color: var(--fg); border: 1px solid var(--border);
+                  border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  .pager button:disabled { opacity: 0.4; cursor: default; }
+  .loading, .error { padding: 40px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>Red-Flag Screener</h1>
+<div class="subtitle">
+  Beneish M-Score &middot; Altman Z-Score &middot; Piotroski F-Score &mdash;
+  reading <code>data/exports/dashboard.csv</code> straight off disk, nothing sent anywhere.
+</div>
+
+<div id="app"><div class="loading">Loading dashboard.csv&hellip;</div></div>
+
+<script>
+"use strict";
+
+// ---- RFC4180 CSV parser (handles quoted fields with embedded commas/quotes) ----
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else { inQuotes = false; }
+      } else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ',') { row.push(field); field = ""; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); field = "";
+      if (row.length > 1 || row[0] !== "") rows.push(row);
+      row = [];
+    } else field += c;
+  }
+  if (field !== "" || row.length) { row.push(field); rows.push(row); }
+  const header = rows.shift();
+  return rows.map(r => Object.fromEntries(header.map((h, i) => [h, r[i]])));
+}
+
+const NUM_COLS = ["period_fiscal_year", "m_score", "z_score", "f_score", "red_flag_count", "models_scored"];
+const BOOL_COLS = ["is_case_study", "m_score_flag", "z_score_flag", "f_score_flag"];
+
+function coerce(rows) {
+  return rows.map(r => {
+    const out = { ...r };
+    for (const c of NUM_COLS) out[c] = r[c] === "" ? null : Number(r[c]);
+    for (const c of BOOL_COLS) out[c] = r[c] === "" ? null : r[c] === "True";
+    return out;
+  });
+}
+
+let DATA = [], filtered = [], sortCol = "red_flag_count", sortDir = -1, page = 0;
+const PAGE_SIZE = 50;
+
+function svgHistogram(values, { bins = 20, width = 240, height = 90, clipLow = 0.05, clipHigh = 0.95 } = {}) {
+  const vals = values.filter(v => v !== null && !Number.isNaN(v)).sort((a, b) => a - b);
+  if (!vals.length) return { svg: "<div class='note'>no data</div>", clippedNote: "" };
+  const lo = vals[Math.floor(vals.length * clipLow)];
+  const hi = vals[Math.ceil(vals.length * clipHigh) - 1] || vals[vals.length - 1];
+  const range = hi - lo || 1;
+  const counts = new Array(bins).fill(0);
+  let clipped = 0;
+  for (const v of vals) {
+    if (v < lo || v > hi) { clipped++; }
+    const idx = Math.min(bins - 1, Math.max(0, Math.floor(((v - lo) / range) * bins)));
+    counts[idx]++;
+  }
+  const max = Math.max(...counts, 1);
+  const bw = width / bins;
+  const bars = counts.map((c, i) => {
+    const h = (c / max) * (height - 16);
+    return `<rect x="${i * bw + 1}" y="${height - h - 14}" width="${bw - 2}" height="${h}" fill="var(--accent)" opacity="0.75"><title>${c}</title></rect>`;
+  }).join("");
+  const svg = `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+      ${bars}
+      <text x="2" y="${height - 2}">${lo.toFixed(2)}</text>
+      <text x="${width - 34}" y="${height - 2}">${hi.toFixed(2)}</text>
+    </svg>`;
+  const clippedNote = clipped ? `${clipped} outlier${clipped === 1 ? "" : "s"} outside 5th–95th pct clipped to range edges` : "";
+  return { svg, clippedNote };
+}
+
+function sectorBarChart(rows, width = 520, height = 160) {
+  const bySector = {};
+  for (const r of rows) {
+    const s = r.gics_sector || "(no sector data)";
+    if (!bySector[s]) bySector[s] = { sum: 0, n: 0 };
+    bySector[s].sum += r.red_flag_count || 0;
+    bySector[s].n++;
+  }
+  const entries = Object.entries(bySector)
+    .map(([s, { sum, n }]) => [s, sum / n, n])
+    .sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return "<div class='note'>no data</div>";
+  const max = Math.max(...entries.map(e => e[1]), 0.01);
+  const rowH = Math.min(20, (height - 10) / entries.length);
+  const labelW = 150;
+  const barMaxW = width - labelW - 40;
+  const rows2 = entries.map(([s, avg, n], i) => {
+    const y = i * rowH;
+    const w = (avg / max) * barMaxW;
+    return `<text x="0" y="${y + rowH - 6}" font-size="10">${s.length > 22 ? s.slice(0, 21) + "…" : s}</text>
+      <rect x="${labelW}" y="${y + 3}" width="${w}" height="${rowH - 6}" fill="var(--accent)" opacity="0.75"><title>${s}: avg ${avg.toFixed(2)} (n=${n})</title></rect>
+      <text x="${labelW + w + 4}" y="${y + rowH - 6}" font-size="10" fill="var(--muted)">${avg.toFixed(2)}</text>`;
+  }).join("");
+  return `<svg width="${width}" height="${entries.length * rowH + 10}" viewBox="0 0 ${width} ${entries.length * rowH + 10}">${rows2}</svg>`;
+}
+
+function flagCell(v) {
+  if (v === null) return `<span class="flag-null">&mdash;</span>`;
+  return v ? `<span class="flag-true">flag</span>` : `<span class="flag-false">clear</span>`;
+}
+function zoneBadge(z) { return z ? `<span class="badge ${z}">${z}</span>` : ""; }
+
+function applyFilters() {
+  const q = document.getElementById("f-search").value.trim().toLowerCase();
+  const sector = document.getElementById("f-sector").value;
+  const caseOnly = document.getElementById("f-case").checked;
+  const minFlags = Number(document.getElementById("f-flags").value);
+  const yMin = Number(document.getElementById("f-ymin").value) || -Infinity;
+  const yMax = Number(document.getElementById("f-ymax").value) || Infinity;
+
+  filtered = DATA.filter(r => {
+    if (q && !(r.ticker.toLowerCase().includes(q) || r.company_name.toLowerCase().includes(q))) return false;
+    if (sector && r.gics_sector !== sector) return false;
+    if (caseOnly && !r.is_case_study) return false;
+    if ((r.red_flag_count || 0) < minFlags) return false;
+    if (r.period_fiscal_year < yMin || r.period_fiscal_year > yMax) return false;
+    return true;
+  });
+  page = 0;
+  renderStats();
+  renderCharts();
+  renderTable();
+}
+
+function renderStats() {
+  const n = filtered.length;
+  const companies = new Set(filtered.map(r => r.ticker)).size;
+  const flagged1 = filtered.filter(r => (r.red_flag_count || 0) >= 1).length;
+  const flagged2 = filtered.filter(r => (r.red_flag_count || 0) >= 2).length;
+  document.getElementById("stats").innerHTML = `
+    <div class="stat"><div class="n">${n.toLocaleString()}</div><div class="l">company-years shown</div></div>
+    <div class="stat"><div class="n">${companies.toLocaleString()}</div><div class="l">distinct companies</div></div>
+    <div class="stat"><div class="n">${flagged1.toLocaleString()}</div><div class="l">&ge;1 red flag</div></div>
+    <div class="stat"><div class="n">${flagged2.toLocaleString()}</div><div class="l">&ge;2 red flags</div></div>`;
+}
+
+function renderCharts() {
+  const m = svgHistogram(filtered.map(r => r.m_score));
+  const z = svgHistogram(filtered.map(r => r.z_score));
+  const f = svgHistogram(filtered.map(r => r.f_score), { bins: 10, clipLow: 0, clipHigh: 1 });
+  document.getElementById("chart-m").innerHTML = m.svg + (m.clippedNote ? `<div class="note">${m.clippedNote}</div>` : "");
+  document.getElementById("chart-z").innerHTML = z.svg + (z.clippedNote ? `<div class="note">${z.clippedNote}</div>` : "");
+  document.getElementById("chart-f").innerHTML = f.svg;
+  document.getElementById("chart-sector").innerHTML = sectorBarChart(filtered);
+}
+
+function sortRows(rows) {
+  return [...rows].sort((a, b) => {
+    let av = a[sortCol], bv = b[sortCol];
+    if (av === null || av === undefined) av = -Infinity;
+    if (bv === null || bv === undefined) bv = -Infinity;
+    if (typeof av === "string") { av = av.toLowerCase(); bv = String(bv).toLowerCase(); }
+    if (av < bv) return -1 * sortDir;
+    if (av > bv) return 1 * sortDir;
+    return 0;
+  });
+}
+
+function renderTable() {
+  const sorted = sortRows(filtered);
+  const start = page * PAGE_SIZE;
+  const pageRows = sorted.slice(start, start + PAGE_SIZE);
+
+  const cols = [
+    ["ticker", "Ticker"], ["company_name", "Company"], ["gics_sector", "Sector"],
+    ["period_fiscal_year", "FY"], ["m_score", "M-Score"], ["z_score", "Z-Score"],
+    ["z_zone", "Zone"], ["f_score", "F-Score"], ["f_band", "Band"],
+    ["red_flag_count", "Flags"], ["models_scored", "Scored"],
+  ];
+  const thead = cols.map(([k, label]) => {
+    const isSorted = k === sortCol;
+    return `<th data-col="${k}" class="${isSorted ? "sorted" : ""}" data-dir="${isSorted ? (sortDir === 1 ? "▲" : "▼") : ""}">${label}</th>`;
+  }).join("") + "<th>Case study</th>";
+
+  const tbody = pageRows.map(r => `
+    <tr class="${r.is_case_study ? "case-study" : ""}">
+      <td>${r.ticker}</td>
+      <td>${r.company_name}</td>
+      <td>${r.gics_sector || "<span class='flag-null'>&mdash;</span>"}</td>
+      <td>${r.period_fiscal_year}</td>
+      <td>${r.m_score ?? "<span class='flag-null'>&mdash;</span>"}</td>
+      <td>${r.z_score ?? "<span class='flag-null'>&mdash;</span>"}</td>
+      <td>${zoneBadge(r.z_zone)}</td>
+      <td>${r.f_score ?? "<span class='flag-null'>&mdash;</span>"}</td>
+      <td>${zoneBadge(r.f_band)}</td>
+      <td>${r.red_flag_count} / ${r.models_scored}</td>
+      <td>${r.models_scored}</td>
+      <td title="${r.case_study_note || ""}">${r.is_case_study ? "★" : ""}</td>
+    </tr>`).join("");
+
+  document.getElementById("table-container").innerHTML = `
+    <div class="table-wrap"><table>
+      <thead><tr>${thead}</tr></thead>
+      <tbody>${tbody || `<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:20px;">no rows match these filters</td></tr>`}</tbody>
+    </table></div>
+    <div class="pager">
+      <button id="prev" ${page === 0 ? "disabled" : ""}>&larr; prev</button>
+      <span>page ${sorted.length ? page + 1 : 0} of ${Math.max(1, Math.ceil(sorted.length / PAGE_SIZE))}</span>
+      <button id="next" ${start + PAGE_SIZE >= sorted.length ? "disabled" : ""}>next &rarr;</button>
+    </div>`;
+
+  document.querySelectorAll("thead th[data-col]").forEach(th => {
+    th.addEventListener("click", () => {
+      const col = th.dataset.col;
+      if (sortCol === col) sortDir *= -1; else { sortCol = col; sortDir = 1; }
+      renderTable();
+    });
+  });
+  document.getElementById("prev").onclick = () => { page--; renderTable(); };
+  document.getElementById("next").onclick = () => { page++; renderTable(); };
+}
+
+function buildUI() {
+  const sectors = [...new Set(DATA.map(r => r.gics_sector).filter(Boolean))].sort();
+  document.getElementById("app").innerHTML = `
+    <div class="stats" id="stats"></div>
+    <div class="controls">
+      <input id="f-search" type="text" placeholder="Search ticker or company…" style="width:200px">
+      <select id="f-sector"><option value="">All sectors</option>${sectors.map(s => `<option>${s}</option>`).join("")}</select>
+      <label><input id="f-case" type="checkbox"> Case studies only</label>
+      <select id="f-flags">
+        <option value="0">Any flag count</option>
+        <option value="1">&ge; 1 flag</option>
+        <option value="2">&ge; 2 flags</option>
+        <option value="3">&ge; 3 flags</option>
+      </select>
+      <label>FY <input id="f-ymin" type="number" placeholder="min" style="width:70px"></label>
+      <label>&ndash; <input id="f-ymax" type="number" placeholder="max" style="width:70px"></label>
+    </div>
+    <div class="charts">
+      <div class="chart-box"><h3>M-Score distribution (higher = more manipulation-like; flag &gt; -1.78)</h3><div id="chart-m"></div></div>
+      <div class="chart-box"><h3>Z-Score distribution (lower = more distress; flag &lt; 1.81)</h3><div id="chart-z"></div></div>
+      <div class="chart-box"><h3>F-Score distribution (lower = weaker; flag &le; 2)</h3><div id="chart-f"></div></div>
+      <div class="chart-box"><h3>Avg red flags by sector</h3><div id="chart-sector"></div></div>
+    </div>
+    <div id="table-container"></div>`;
+
+  ["f-search", "f-sector", "f-case", "f-flags", "f-ymin", "f-ymax"].forEach(id =>
+    document.getElementById(id).addEventListener("input", applyFilters));
+
+  applyFilters();
+}
+
+fetch("../data/exports/dashboard.csv")
+  .then(r => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.text();
+  })
+  .then(text => {
+    DATA = coerce(parseCSV(text));
+    buildUI();
+  })
+  .catch(err => {
+    document.getElementById("app").innerHTML = `<div class="error">
+      Couldn't load <code>data/exports/dashboard.csv</code> (${err.message}).<br><br>
+      Run <code>make dashboard</code> first, and make sure you're viewing this via
+      <code>make dashboard-web</code> (a local server) &mdash; opening this file directly
+      (<code>file://</code>) can't fetch local CSVs due to browser restrictions.
+    </div>`;
+  });
+</script>
+</body>
+</html>
