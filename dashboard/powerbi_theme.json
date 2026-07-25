@@ -1,0 +1,22 @@
+{
+  "name": "Red-Flag Screener — Forensic Dark",
+  "dataColors": [
+    "#3987e5",
+    "#d95926",
+    "#199e70",
+    "#c98500",
+    "#d55181",
+    "#008300",
+    "#9085e9",
+    "#e66767"
+  ],
+  "background": "#1a1a19",
+  "foreground": "#ffffff",
+  "tableAccent": "#3987e5",
+  "good": "#0ca30c",
+  "bad": "#d03b3b",
+  "neutral": "#fab219",
+  "maximum": "#3987e5",
+  "center": "#383835",
+  "minimum": "#184f95"
+}

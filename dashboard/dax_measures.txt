@@ -1,0 +1,207 @@
+// Red-Flag Screener — starter DAX measures for Power BI
+// Paste into a new measure on the `dashboard` table (Modeling > New measure).
+// Source columns used: m_score_flag/z_score_flag/f_score_flag are text "True"/"False"/"" (blank = model not scored that year)
+// z_zone: "safe" | "grey" | "distress" | ""   f_band: "strong" | "neutral" | "weak" | ""   red_flag_count: 0-3
+
+// ---------- Fleet-level KPIs (page 1 cards) ----------
+
+Companies Screened =
+DISTINCTCOUNT ( dashboard[entity_id] )
+
+Company-Years Scored =
+COUNTROWS ( dashboard )
+
+Red Flag Rate % =
+DIVIDE (
+    CALCULATE ( COUNTROWS ( dashboard ), dashboard[red_flag_count] > 0 ),
+    COUNTROWS ( dashboard )
+)
+
+Avg Red Flags per Company-Year =
+AVERAGE ( dashboard[red_flag_count] )
+
+Companies with Any Red Flag =
+CALCULATE (
+    DISTINCTCOUNT ( dashboard[entity_id] ),
+    dashboard[red_flag_count] > 0
+)
+
+// ---------- Per-model flag rates (for the leaderboard / model comparison) ----------
+
+M-Score Flag Rate % =
+DIVIDE (
+    CALCULATE ( COUNTROWS ( dashboard ), dashboard[m_score_flag] = "True" ),
+    CALCULATE ( COUNTROWS ( dashboard ), dashboard[m_score_flag] <> "" )
+)
+
+Z-Score Distress Rate % =
+DIVIDE (
+    CALCULATE ( COUNTROWS ( dashboard ), dashboard[z_zone] = "distress" ),
+    CALCULATE ( COUNTROWS ( dashboard ), dashboard[z_zone] <> "" )
+)
+
+F-Score Weak Rate % =
+DIVIDE (
+    CALCULATE ( COUNTROWS ( dashboard ), dashboard[f_band] = "weak" ),
+    CALCULATE ( COUNTROWS ( dashboard ), dashboard[f_band] <> "" )
+)
+
+// ---------- Sector rollups (heatmap / bar) ----------
+
+Avg M-Score by Sector =
+AVERAGE ( dashboard[m_score] )     // drop onto a matrix with gics_sector on rows
+
+Avg Z-Score by Sector =
+AVERAGE ( dashboard[z_score] )
+
+Sector Red Flag Rate % =
+DIVIDE (
+    CALCULATE ( COUNTROWS ( dashboard ), dashboard[red_flag_count] > 0 ),
+    COUNTROWS ( dashboard )
+)
+// same expression as the fleet-level version — correct because it re-evaluates
+// per the sector filter context supplied by whatever visual it sits in.
+
+// ---------- Trend / YoY ----------
+
+Red Flags PY =
+CALCULATE (
+    [Red Flag Rate %],
+    FILTER ( ALL ( dashboard[period_fiscal_year] ), dashboard[period_fiscal_year] = MAX ( dashboard[period_fiscal_year] ) - 1 )
+)
+
+Red Flag Rate YoY Δ =
+[Red Flag Rate %] - [Red Flags PY]
+
+// ---------- Case-study spotlight page ----------
+
+Case Study Red Flags =
+CALCULATE (
+    COUNTROWS ( dashboard ),
+    dashboard[is_case_study] = "True",
+    dashboard[red_flag_count] > 0
+)
+
+// Danger-threshold reference lines to add as constant lines on the M-Score / Z-Score
+// trend charts (Format pane > Analytics > Constant line), not measures:
+//   M-Score manipulation threshold:  -1.78
+//   Z-Score distress threshold:       1.81
+//   Z-Score grey-zone ceiling:        2.99
+
+// ---------- Icon / conditional-formatting helper ----------
+// Don't compute an icon in DAX — use native conditional formatting instead:
+// Table/matrix > column > Conditional formatting > Icons, rule:
+//   red_flag_count = 0  -> none
+//   red_flag_count = 1  -> amber dot
+//   red_flag_count >= 2 -> red flag icon
+// This keeps the model simple and renders faster than a DAX-built icon column.
+
+// ---------- Ranking (top-offenders bar chart) ----------
+
+Red Flag Rank =
+RANKX (
+    ALL ( dashboard[ticker] ),
+    CALCULATE ( SUM ( dashboard[red_flag_count] ) ),
+    ,
+    DESC,
+    DENSE
+)
+
+// ==========================================================================
+// Case-Study Spotlight page — requires importing dbt/seeds/backtest_events.csv
+// as a second table (Get Data > Text/CSV), keep only rows where
+// event_label = "pre_disclosure" (drop the "full_history" control rows),
+// then relate backtest_events[ticker] -> dashboard[ticker] (many-to-one,
+// single direction). This is what makes the "N years early" number and the
+// event annotations recompute per selected case-study company instead of
+// being hardcoded to UAA.
+// ==========================================================================
+
+Selected Case Study =
+SELECTEDVALUE ( dashboard[ticker], "UAA" )
+
+Case Study Company Name =
+CALCULATE (
+    SELECTEDVALUE ( dashboard[company_name] ),
+    dashboard[ticker] = [Selected Case Study]
+)
+
+As-Of Date =
+SELECTEDVALUE ( backtest_events[as_of_date] )
+
+Public Disclosure Date =
+SELECTEDVALUE ( backtest_events[public_event_date] )
+
+Lead Time Years =
+DIVIDE (
+    DATEDIFF ( [As-Of Date], [Public Disclosure Date], DAY ),
+    365.25
+)
+
+Lead Time Label =
+VAR yrs = [Lead Time Years]
+RETURN
+    FORMAT ( yrs, "0.0" ) & " years before it became public"
+
+Spotlight Title =
+[Case Study Company Name] & " (" & [Selected Case Study] & ") — flagged "
+    & FORMAT ( [As-Of Date], "mmm d, yyyy" ) & ", " & [Lead Time Label]
+
+Is Flagged Year =
+VAR flagCount = SELECTEDVALUE ( dashboard[red_flag_count] )
+RETURN
+    IF ( flagCount > 0, 1, 0 )
+// Use this to drive marker-color conditional formatting on the M-Score /
+// Z-Score line charts: flagged years render in status "bad" red, all
+// others in the series blue.
+
+// ==========================================================================
+// Drill-through page — requires importing data/exports/score_detail.csv as a
+// third table (Get Data > Text/CSV) and relating score_detail[detail_key] ->
+// dashboard[detail_key] (many-to-one, single direction, both tables already
+// carry this column post `make dashboard`). This is the generic "why was
+// THIS company flagged" page for any of the 501 companies, not just the 7
+// case studies -- reached via right-click > Drill through from the sector
+// heatmap or the ranking bar chart on page 1.
+// ==========================================================================
+
+// --- M-Score index deltas vs. the "1.0 = unchanged YoY" baseline ---
+// dsri/gmi/aqi/sgi/depi/sgai/lvgi are all YoY ratios; 1.0 means no change,
+// and each one's OWN direction of concern differs (see spec), so don't
+// threshold them all the same way in conditional formatting -- read the
+// spec notes per index instead of a single blanket rule.
+
+AQI Elevated =
+IF ( SELECTEDVALUE ( score_detail[aqi] ) > 1.5, "Elevated", "Normal" )
+
+TATA Elevated =
+IF ( SELECTEDVALUE ( score_detail[tata] ) > 0.05, "Elevated", "Normal" )
+// Beneish's own TATA cutoff; UAA FY2015 = 0.096, well above it.
+
+// --- F-Score signal pass count, for the 9-signal checklist visual ---
+F-Score Signals Passed =
+SELECTEDVALUE ( score_detail[signal_positive_roa] )
+    + SELECTEDVALUE ( score_detail[signal_positive_cfo] )
+    + SELECTEDVALUE ( score_detail[signal_roa_improved] )
+    + SELECTEDVALUE ( score_detail[signal_earnings_quality] )
+    + SELECTEDVALUE ( score_detail[signal_leverage_decreased] )
+    + SELECTEDVALUE ( score_detail[signal_liquidity_improved] )
+    + SELECTEDVALUE ( score_detail[signal_no_dilution] )
+    + SELECTEDVALUE ( score_detail[signal_margin_improved] )
+    + SELECTEDVALUE ( score_detail[signal_turnover_improved] )
+
+Drillthrough Title =
+SELECTEDVALUE ( dashboard[company_name] ) & " — FY"
+    & SELECTEDVALUE ( dashboard[period_fiscal_year] )
+
+// ==========================================================================
+// Fleet Overview page — KPI card row subtitles
+// ==========================================================================
+
+Any-Flag Share Label =
+FORMAT ( DIVIDE ( [Companies with Any Red Flag], [Companies Screened] ), "0%" )
+    & " of screened fleet"
+
+Universe Span Label =
+"FY " & CALCULATE ( MIN ( dashboard[period_fiscal_year] ) )
+    & "–" & CALCULATE ( MAX ( dashboard[period_fiscal_year] ) ) Rule: Is Flagged Year = 1 -> #d03b3b.

@@ -34,7 +34,10 @@ def main() -> int:
 
     con = duckdb.connect(str(WAREHOUSE), read_only=True)
     try:
-        df = con.execute("select * from main_marts.fct_dashboard").fetchdf()
+        df = con.execute(
+            "select *, entity_id || '-' || period_fiscal_year as detail_key "
+            "from main_marts.fct_dashboard"
+        ).fetchdf()
     finally:
         con.close()
 

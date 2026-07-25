@@ -61,6 +61,7 @@ sloan-test:
 # warehouse is queryable directly for everything else.
 dashboard:
 	PYTHONPATH=src $(PY) -m redflag.export_dashboard
+	PYTHONPATH=src $(PY) -m redflag.export_score_detail
 
 # Serves the repo root (not just dashboard/) so dashboard/index.html's
 # relative fetch of ../data/exports/dashboard.csv resolves. Plain
