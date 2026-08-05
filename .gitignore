@@ -27,3 +27,6 @@ logs/
 
 .env
 .DS_Store
+
+# Local agent tooling state — never committed
+.claude-flow/
