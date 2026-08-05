@@ -820,6 +820,9 @@ make it more certain than the validation says it is.
 
 ## Roadmap
 
+See [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) for the sequencing logic, risk
+pattern, and decision log behind the phases below.
+
 - [x] Phase 1 — ingestion, staging, point-in-time fact table
 - [x] Phase 1b — fix tag/sign/units contamination above
 - [x] Phase 3a — Beneish M-Score, validated against case studies
