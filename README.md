@@ -828,7 +828,7 @@ make it more certain than the validation says it is.
 - [x] Phase 2 — expand to the S&P 500 (501 companies, 7,554 company-years; done after the metric layer was proven, not before)
 - [x] Phase 4 — formal validation: point-in-time case backtest (UAA flagged 3.7 years early) + Sloan (1996) accrual forward-return test
 - [x] Phase 5 — dashboard: `fct_dashboard` mart + `dashboard.csv` export + a local browser dashboard (`make dashboard-web`) + build spec for a Power BI screener / Tableau Public mirror (plain CSV, no API key)
-- [ ] Phase 6 — findings write-up
+- [x] Phase 6 — findings write-up ([docs/FINDINGS.md](docs/FINDINGS.md))
 
 ---
 
