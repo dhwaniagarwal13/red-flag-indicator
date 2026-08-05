@@ -204,4 +204,8 @@ FORMAT ( DIVIDE ( [Companies with Any Red Flag], [Companies Screened] ), "0%" )
 
 Universe Span Label =
 "FY " & CALCULATE ( MIN ( dashboard[period_fiscal_year] ) )
-    & "–" & CALCULATE ( MAX ( dashboard[period_fiscal_year] ) ) Rule: Is Flagged Year = 1 -> #d03b3b.
+    & "–" & CALCULATE ( MAX ( dashboard[period_fiscal_year] ) )
+
+// Conditional-formatting rule for "Is Flagged Year" above, spelled out
+// explicitly since the theme file only names the color, not where to use it:
+// Is Flagged Year = 1 -> #d03b3b (powerbi_theme.json's "bad" color).
