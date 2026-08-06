@@ -1,0 +1,30 @@
+name: Daily Activity Log
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Append daily entry
+        run: |
+          mkdir -p .github/daily-log
+          date -u +'%Y-%m-%dT%H:%M:%SZ' >> .github/daily-log/activity.log
+
+      - name: Commit and push
+        run: |
+          git config user.name "Dhwani Agarwal"
+          git config user.email "dhwaniagarwal1395@gmail.com"
+          git add .github/daily-log/activity.log
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: daily activity log update"
+          git push
